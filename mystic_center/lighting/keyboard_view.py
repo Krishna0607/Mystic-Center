@@ -29,7 +29,7 @@ def _round_rect(cr, x, y, w, h, r):
     cr.new_sub_path()
     cr.arc(x + w - r, y + r, r, -math.pi / 2, 0)
     cr.arc(x + w - r, y + h - r, r, 0, math.pi / 2)
-    cr.arc(x + r, y + h - r, r, math.pi, 3 * math.pi / 2)
+    cr.arc(x + r, y + h - r, r, math.pi / 2, math.pi)
     cr.arc(x + r, y + r, r, math.pi, 3 * math.pi / 2)
     cr.close_path()
 
@@ -166,7 +166,7 @@ def draw_keyboard(cr, width: float, height: float, colors: list[str],
     for k in KEYS:
         z = k.zone
         r, g, b = _rgb(colors[z])
-        radius = 0.09 if k.h > 0.6 else 0.07
+        radius = 0.04 if k.h > 0.6 else 0.03   # squarish keycaps, hint of a bevel
 
         # key face: near-black with a hint of the zone colour
         _round_rect(cr, k.x, k.y, k.w, k.h, radius)
@@ -205,7 +205,7 @@ def draw_keyboard(cr, width: float, height: float, colors: list[str],
     cw = WIDTH / NUM_ZONES
     for z in range(NUM_ZONES):
         r, g, b = _rgb(colors[z])
-        _round_rect(cr, z * cw + 0.03, sy, cw - 0.06, ZONE_STRIP_H, 0.06)
+        _round_rect(cr, z * cw + 0.03, sy, cw - 0.06, ZONE_STRIP_H, 0.04)
         cr.set_source_rgb(r, g, b)
         cr.fill_preserve()
         if z in selected:
