@@ -222,3 +222,8 @@ mystic-center                        # GUI
 ## Author
 
 **Krishna Dave** — [@Krishna0607](https://github.com/Krishna0607) · krishna.dave0607@gmail.com
+
+## License
+
+MIT — free to use, modify, and redistribute; provided as is, without any
+warranty or liability (see [LICENSE](LICENSE)).
