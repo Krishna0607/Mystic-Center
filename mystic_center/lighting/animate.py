@@ -2,12 +2,18 @@
 
 The firmware's hardware wave is coarse (2–3 visible bands), so MSI-style
 effects are painted per frame from software: each engine computes the 24
-zone colors and they are sent with steady zone packets (grouped by color).
+zone colors and they are sent with steady zone packets.
 
-Column geometry: the 24 zones are laid out row-major with 4 columns per row
-(zone i → row i//4, column i%4), hardware-verified on this machine. MSI's
-Wave runs across the *columns*, so every zone in one column shares a hue and
-the pattern drifts left/right over time.
+Packet contract (validated on this machine's firmware): the device refreshes
+zone colors reliably when every frame carries *distinct* colors on
+single-zone masks; large shared masks with repeated effect-config packets
+are cached by the MCU and get dropped, which stalls animation. Every engine
+therefore produces 24 distinct per-zone colors per frame — the invisible
+`hexc_unique` folds the zone index into the low bits of red/blue so even
+uniform or dark frames keep every zone on its own mask.
+
+Frame loop: each frame, the engine's 24 colors go out as one
+MysticKeyboard.steady_zones call (a packet per zone).
 """
 
 from __future__ import annotations
@@ -19,67 +25,65 @@ import time
 
 from .keyboard import NUM_ZONES, MysticKeyboard
 
-N_COLS = 4  # zone columns per hardware row
+N_COLS = 4  # zone columns per hardware row (row-major: zone i → row i//4)
 
 
-def hsl(hue: float, sat: float = 1.0, light: float = 0.55) -> tuple[int, int, int]:
+def hsl(hue: float, sat: float = 1.0, light: float = 0.60) -> tuple[int, int, int]:
     r, g, b = colorsys.hls_to_rgb((hue % 360.0) / 360.0, light, sat)
     return int(r * 255), int(g * 255), int(b * 255)
 
 
-def hexc(hue: float, sat: float = 1.0, light: float = 0.55) -> str:
+def hexc(hue: float, sat: float = 1.0, light: float = 0.60) -> str:
     return "%02X%02X%02X" % hsl(hue, sat, light)
 
 
-def quantize(color: str, step: int = 16) -> str:
-    """Round each channel to a multiple of `step` so similar colors merge
-    into one packet group (big win on the feature-report bus)."""
-    if len(color) != 6:
-        return color
-    out = []
-    for i in (0, 2, 4):
-        v = int(color[i:i + 2], 16)
-        q = (v + step // 2) // step * step
-        out.append(max(0, min(255, q)))
-    return "%02X%02X%02X" % tuple(out)
+def hexc_unique(hue: float, sat: float, light: float, z: int) -> str:
+    """Per-zone color that never collides across the 24 zones.
+
+    Folds the zone index into the low bits of red/blue (≤7/255 = ~3% delta,
+    invisible on a lit LED). With a shared (hue, sat, light), every zone
+    yields a different byte pair — the packet contract for animation."""
+    r, g, b = hsl(hue, sat, light)
+    r = (r & 0b11111100) | (z & 0x03)
+    b = (b & 0b11111000) | ((z >> 2) & 0x07)
+    return "%02X%02X%02X" % (r, g, b)
 
 
 class RainbowWave:
-    """MSI-style Wave: vertical rainbow bands sweeping across the columns.
-
-    All zones in a column share a hue; adjacent columns are 90° apart, so at
-    any instant the whole board spans the full rainbow, and the phase drifts
-    smoothly over time (direction selects the travel direction)."""
+    """Wave: full rainbow across all 24 zones (row-major), sliding smoothly
+    over time. The original validated geometry. Hue span covers the MSI
+    palette: red → orange → yellow → green → cyan → blue → violet/magenta."""
 
     name = "wave"
 
     def __init__(self, direction: int = 1, speed: float = 6.0,
-                 col_span: float = 90.0, light: float = 0.62):
+                 light: float = 0.60):
         self.direction = 1 if direction == 1 else -1
-        self.period = max(1.0, float(speed))  # seconds per full hue loop
-        self.span = col_span
+        self.period = max(1.0, float(speed))  # seconds per full hue lap
         self.light = light
 
     def colors(self, t: float) -> list[str]:
-        drift = self.direction * (t / self.period) * 360.0
+        shift = 360.0 * self.direction * (t / self.period)
         return [
-            hexc((z % N_COLS) * self.span + drift, 1.0, self.light)
+            hexc_unique((z / NUM_ZONES) * 360.0 + shift, 1.0, self.light, z)
             for z in range(NUM_ZONES)
         ]
 
 
 class RainbowCycle:
-    """Whole keyboard cycles hue together (one color at a time)."""
+    """Whole keyboard cycles hue through the spectrum together (the subtle
+    per-zone low-bit fold keeps every packet single-zone)."""
 
     name = "scycle"
 
-    def __init__(self, speed: float = 6.0, sat: float = 1.0, light: float = 0.62):
+    def __init__(self, speed: float = 6.0, sat: float = 1.0, light: float = 0.60):
         self.period = max(1.0, float(speed))
         self.sat, self.light = sat, light
 
     def colors(self, t: float) -> list[str]:
-        c = hexc((t / self.period) * 360.0 * -1, self.sat, self.light)
-        return [c] * NUM_ZONES
+        base = (t / self.period) * 360.0 * -1
+        return [hexc_unique(base, self.sat, self.light, z)
+                for z in range(NUM_ZONES)]
 
 
 class RainbowBreathPulse:
@@ -93,16 +97,16 @@ class RainbowBreathPulse:
 
     def colors(self, t: float) -> list[str]:
         phase = (t / self.period) % 1.0
-        glow = 0.5 - 0.5 * math.cos(2 * math.pi * phase)  # 0..1 breathing
-        r, g, b = hsl(self.hue0 + (t / (self.period * 8)) * 360.0)
-        c = "%02X%02X%02X" % (int(r * glow), int(g * glow), int(b * glow))
-        return [c] * NUM_ZONES
+        glow = 0.5 - 0.5 * math.cos(2 * math.pi * phase)
+        glow = 0.45 + 0.55 * glow
+        hue0 = self.hue0 + (t / (self.period * 8)) * 360.0
+        return [hexc_unique(hue0, 1.0, 0.60 * glow, z)
+                for z in range(NUM_ZONES)]
 
 
 class RainbowBreath:
-    """Rainbow Breathing — the board breathes in brightness while the hue
-    slowly rotates through the whole spectrum. Keeps a visible floor so it
-    never reads as "frozen dark"."""
+    """Rainbow Breathing — brightness breathes while the hue rotates; keeps
+    a visible floor so it never reads as dark/locked."""
 
     name = "rbreath"
 
@@ -113,14 +117,15 @@ class RainbowBreath:
     def colors(self, t: float) -> list[str]:
         phase = (t / self.period) % 1.0
         glow = 0.5 - 0.5 * math.cos(2 * math.pi * phase)
-        glow = 0.45 + 0.55 * glow  # brightness floor: never dark-locked
+        glow = 0.45 + 0.55 * glow
         hue = (t / (self.period * 2.5)) * 360.0
-        return [hexc(hue, 1.0, self.light * glow)] * NUM_ZONES
+        return [hexc_unique(hue, 1.0, self.light * glow, z)
+                for z in range(NUM_ZONES)]
 
 
 class Fire:
-    """Warm flame flicker (OpenRGB-style): every zone is a small flame with
-    its own phase; hot moments shift yellow, calm moments go deep red."""
+    """Warm flame flicker (OpenRGB-style): every zone is a flame with its
+    own phase; hot moments shift yellow, calm moments go deep red."""
 
     name = "fire"
 
@@ -135,13 +140,13 @@ class Fire:
         for z in range(NUM_ZONES):
             w = 0.5 + 0.5 * math.sin(t * self.freq[z] * self.rate + self.phase[z])
             hue = 45.0 - 32.0 * w  # 45° (amber) hot → 13° (red) calm
-            out.append(quantize(hexc(hue, 1.0, 0.42 + 0.42 * w), 20))
+            out.append(hexc_unique(hue, 1.0, 0.42 + 0.42 * w, z))
         return out
 
 
 class Rain:
     """Digital rain (OpenRGB-style): random zones light up in a random hue
-    and fade away. Colors are quantized so packet groups stay small."""
+    and fade away."""
 
     name = "rain"
 
@@ -153,11 +158,6 @@ class Rain:
                     for _ in range(NUM_ZONES)]
         self.hue = [rnd.randrange(360) for _ in range(NUM_ZONES)]
         self.prev_t = 0.0
-
-    def _pix(self, z: int) -> str:
-        if self.val[z] <= 0.0:
-            return quantize("000000", 24)
-        return quantize(hexc(self.hue[z], 1.0, 0.22 + 0.68 * self.val[z]), 20)
 
     def colors(self, t: float) -> list[str]:
         dt = min(0.35, max(0.0, t - self.prev_t))
@@ -171,6 +171,12 @@ class Rain:
                 self.hue[z] = random.randrange(360)
         return [self._pix(z) for z in range(NUM_ZONES)]
 
+    def _pix(self, z: int) -> str:
+        if self.val[z] <= 0.0:
+            return hexc_unique(0.0, 0.0, 0.012, z)
+        return hexc_unique(self.hue[z], 1.0,
+                           0.22 + 0.68 * self.val[z], z)
+
 
 class Radar:
     """Radar sweep — a beam with a fading trail crossing left↔right."""
@@ -183,7 +189,7 @@ class Radar:
         self.hue = hue
 
     def colors(self, t: float) -> list[str]:
-        x = ((t / self.period) % 1.0) * (N_COLS + 2.0)  # head incl. offscreen
+        x = ((t / self.period) % 1.0) * (N_COLS + 2.0)
         head = x if self.dir == 1 else (N_COLS + 2.0 - x)
         out = []
         for z in range(NUM_ZONES):
@@ -191,16 +197,16 @@ class Radar:
             d = head - col
             val = 1.0 - d / 2.6 if 0.0 <= d <= 2.6 else 0.0
             if val <= 0.01:
-                out.append(quantize("000000", 24))
+                out.append(hexc_unique(0.0, 0.0, 0.012, z))
             else:
-                out.append(quantize(
-                    hexc(self.hue + 25.0 * val, 1.0, 0.18 + 0.62 * val), 20))
+                out.append(hexc_unique(self.hue + 25.0 * val, 1.0,
+                                       0.18 + 0.62 * val, z))
         return out
 
 
 class Lightning:
     """Storm — mostly darkness; short warm-white flashes strike random
-    zones and decay quickly. If a zone is struck twice the flash stacks."""
+    zones and decay quickly."""
 
     name = "lightning"
 
@@ -240,11 +246,10 @@ class Lightning:
         for z in range(NUM_ZONES):
             val = self._decay(z, t)
             if val <= 0.02:
-                out.append(quantize("000000", 24))
+                out.append(hexc_unique(0.0, 0.0, 0.012, z))
             else:
-                out.append(quantize(
-                    hexc(self.FLASH_HUE, self.FLASH_SAT,
-                         0.45 + 0.45 * val), 20))
+                out.append(hexc_unique(self.FLASH_HUE, self.FLASH_SAT,
+                                       0.45 + 0.45 * val, z))
         return out
 
 
@@ -291,7 +296,7 @@ def run(engine_name: str, kb: MysticKeyboard, *, speed: float = 6.0,
 
     signal.signal(signal.SIGTERM, _term)
     signal.signal(signal.SIGINT, _term)
-    frame_min = max(0.08, 1.0 / max(1, fps))  # see below: pace + floor
+    frame_min = max(0.08, 1.0 / max(1, fps))
     t0 = time.monotonic()
     consecutive_fail = 0
     while not stop["v"]:

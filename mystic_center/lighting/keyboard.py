@@ -135,7 +135,7 @@ class MysticKeyboard:
         anim, kfs = effects.steady(color)
         self.apply_effect(anim, kfs, zones=zones, speed=speed)
 
-    def steady_zones(self, zone_colors: dict[int, str]) -> None:
+    def steady_zones(self, zone_colors: dict[int, str], speed: int = 600) -> None:
         """Paint individual zones with their own colors (per-zone mode)."""
         if not zone_colors:
             return
@@ -144,7 +144,7 @@ class MysticKeyboard:
             by_color.setdefault(c, []).append(int(z))
         for color, zones in by_color.items():
             anim, kfs = effects.steady(color)
-            self.apply_effect(anim, kfs, zones=zones, speed=600)
+            self.apply_effect(anim, kfs, zones=zones, speed=speed)
 
     def off(self, zones=None) -> None:
         """Turn lights off with a black steady packet (works on all firmware)."""
