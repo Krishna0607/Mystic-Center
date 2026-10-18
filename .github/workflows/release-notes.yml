@@ -12,7 +12,6 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    shell: bash
     steps:
       - uses: actions/checkout@v4
       - name: Sync curated release notes
