@@ -103,8 +103,8 @@ def _build() -> list[Key]:
         zgroup = 16 if i < 4 else (17 if i < 8 else 18)
         lb = {",": ",^<", ".": ".^>", "/": "/^?"}.get(main, main)
         keys.append(Key(lb, round(1.96 + i * 0.999, 3), ky, 0.88, kh, zgroup))
-    keys.append(Key("⇧ SHIFT", 11.95, ky, 0.78, kh, 18))
-    keys.append(Key("↑", 12.84, ky, 0.74, kh, 19))
+    keys.append(Key("⇧ SHIFT", 11.95, ky, 1.39, kh, 18))   # right shift, per deck art
+    keys.append(Key("↑", 13.52, ky, 0.74, kh, 19))         # directly above ↓
     keys += _row(["1#END", "2#↓", "3#PGDN"], 19, 14.45, 3.14, 0.68, 0.74, 0.80)
     # numpad bottom band sits between the shift row and the bottom row
     keys.append(Key("0#INS", 14.45, 3.99, 1.48, 0.74, 23))
