@@ -78,7 +78,7 @@ Read the [safety notes](#safety-notes) before enabling EC writes.
 ## Installation
 
 ```bash
-git clone https://github.com/Krishna0607/mystic-center.git
+git clone https://github.com/Krishna0607/Mystic-Center.git
 cd mystic-center
 
 ./install.sh                # user parts: app, CLI, desktop entry, icon
