@@ -20,7 +20,7 @@ jobs:
       image: archlinux:base-devel
     steps:
       - name: Install tooling
-        run: pacman -Sy --noconfirm --needed git curl
+        run: pacman -Sy --noconfirm --needed git curl zstd pacman-contrib
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.ref }}
@@ -29,7 +29,7 @@ jobs:
           # makepkg refuses to run as root; build as an unprivileged user
           useradd -m builder
           chown -R builder:builder .
-          su - builder -c "cd \"$PWD/packaging/aur\" && makepkg -f --nodeps --noconfirm"
+          su - builder -c "cd \"$PWD/packaging/aur\" && updpkgsums && makepkg -f --nodeps --noconfirm"
           cp packaging/aur/*.pkg.tar.zst .
           sha256sum *.pkg.tar.zst > sha256sums.txt
           cat sha256sums.txt
@@ -38,6 +38,7 @@ jobs:
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           name: ${{ inputs.tag || github.ref_name }}
+          generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
             *.pkg.tar.zst
