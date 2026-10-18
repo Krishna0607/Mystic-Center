@@ -10,7 +10,7 @@ depends=('python' 'python-gobject' 'gtk4' 'libadwaita')
 optdepends=('nvidia-utils: GPU temperature and utilization in the overview')
 install="$pkgname.install"
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('94cf001db9130952bdfd27c5d68ea81a66075fd7e421a3b71cf331d9b2b49a67')
+sha256sums=('fa136e22532b1970bd09e9ee8a7bf6f1730d955006957d692bd3fbb41097a7cf')
 
 package() {
   cd "$srcdir/Mystic-Center-$pkgver"

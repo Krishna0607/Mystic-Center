@@ -12,6 +12,6 @@ pkgbase = mystic-center
 	depends = libadwaita
 	optdepends = nvidia-utils: GPU temperature and utilization in the overview
 	source = mystic-center-1.0.0.tar.gz::https://github.com/Krishna0607/Mystic-Center/archive/refs/tags/v1.0.0.tar.gz
-	sha256sums = 94cf001db9130952bdfd27c5d68ea81a66075fd7e421a3b71cf331d9b2b49a67
+	sha256sums = fa136e22532b1970bd09e9ee8a7bf6f1730d955006957d692bd3fbb41097a7cf
 
 pkgname = mystic-center

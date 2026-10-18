@@ -29,6 +29,7 @@ jobs:
           # makepkg refuses to run as root; build as an unprivileged user
           useradd -m builder
           chown -R builder:builder .
+          sed -i 's|^#PACKAGER=.*|PACKAGER="Krishna Dave <krishna.dave0607@gmail.com>"|' /etc/makepkg.conf
           su - builder -c "cd \"$PWD/packaging/aur\" && updpkgsums && makepkg -f --nodeps --noconfirm"
           cp packaging/aur/*.pkg.tar.zst .
           sha256sum *.pkg.tar.zst > sha256sums.txt
@@ -38,8 +39,33 @@ jobs:
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           name: ${{ inputs.tag || github.ref_name }}
-          generate_release_notes: true
           fail_on_unmatched_files: true
+          body: |
+            MSI Center for Windows, ported to Linux for the **MSI Crosshair 16 HX D14VFKG (MS-15P2)**.
+
+            ### Install
+
+            **Arch Linux** — package attached below:
+
+            ```bash
+            sudo pacman -U mystic-center-*.pkg.tar.zst
+            sudo systemctl enable --now mystic-center.service
+            ```
+
+            Log out and back in once so the udev ACL grants your session access to the keyboard.
+
+            **Any distro** — from source:
+
+            ```bash
+            git clone https://github.com/Krishna0607/Mystic-Center.git
+            cd Mystic-Center
+            ./install.sh
+            sudo ./install.sh --system
+            ```
+
+            Requirements: kernel `msi-ec` or `msi_wmi_platform`, `ec_sys write_support=1`, `wheel` group, hidraw RGB device, optional `nvidia-smi` — full checklist in the [README](https://github.com/Krishna0607/Mystic-Center#requirements).
+
+            **Full changelog:** https://github.com/Krishna0607/Mystic-Center/commits/${{ inputs.tag || github.ref_name }}
           files: |
             *.pkg.tar.zst
             sha256sums.txt
