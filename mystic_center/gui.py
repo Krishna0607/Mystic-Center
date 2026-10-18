@@ -617,22 +617,24 @@ ICON_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # Physical-key grouping per zone: 4 zone-columns x 6 zone-rows on the
 # Crosshair 16 HX deck (approximate quarter boundaries; the numpad maps into
 # the right-most column, row-major zone ordering hardware-verified). Key
-# labels, order and widths follow the official deck art ("Strike with
-# precision" render): uppercase caps, PRT SCR/INS/DEL/✕/⏻ top-right,
-# arrows cluster left of the numpad, WASD accented.
+# labels follow the official deck art: bottom-left is CTRL / WIN / ALT only
+# (the single Fn key lives bottom-right, after the right CTRL, before the
+# arrows); numpad top row is + − NUM LOCK with ✻ / relocated to the F-row.
+# Legend format: "main^tiny" renders tiny-above (shift legends), "main#tiny"
+# renders tiny-below (numpad nav legends).
 KB_ROWS: list[list[list[str]]] = [
     [["ESC", "F1", "F2", "F3", "F4"], ["F5", "F6", "F7", "F8"],
-     ["F9", "F10", "F11", "F12"], ["PRT SCR", "INS", "DEL", "✕", "⏻"]],
-    [["`", "1", "2", "3", "4"], ["5", "6", "7", "8"],
-     ["9", "0", "-", "=", "BKSP"], ["NUM LK", "/", "*", "−"]],
-    [["TAB", "Q", "W", "E", "R"], ["T", "Y", "U", "I"],
-     ["O", "P", "{", "}", "\\"], ["7", "8", "9", "+"]],
-    [["CAPS", "A", "S", "D", "F"], ["G", "H", "J", "K"],
-     ["L", ";", "'"], ["ENTER", "4", "5", "6"]],
-    [["SHIFT", "Z", "X", "C", "V"], ["B", "N", "M", ","],
-     [".", "/", "SHIFT"], ["↑", "1", "2", "3"]],
-    [["CTRL", "FN", "⊞", "ALT"], ["SPACE", "ALT GR", "\\"],
-     ["CTRL", "FN", "←", "↓", "→"], ["0", ".", "⏎"]],
+     ["F9", "F10", "F11", "F12"], ["PRT SCR", "INS", "DEL", "✻", "/", "⏻"]],
+    [["`^~", "1^!", "2^@", "3^#", "4^$"], ["5^%", "6^^", "7^&", "8^*"],
+     ["9^(", "0^)", "-^_", "=^+", "←^BACKSPACE"], ["+", "−", "NUM\nLOCK"]],
+    [["TAB^⇥", "Q", "W", "E", "R"], ["T", "Y", "U", "I"],
+     ["O", "P", "[^{", "]^}", "\\^|"], ["7#HOME", "8#↑", "9#PGUP"]],
+    [["CAPS LOCK", "A", "S", "D", "F"], ["G", "H", "J", "K"],
+     ["L", ";^:", "'^\""], ["⏎ ENTER", "4#←", "5", "6#→"]],
+    [["⇧ SHIFT", "Z", "X", "C", "V"], ["B", "N", "M", ",^<"],
+     [".^>", "/^?", "⇧ SHIFT"], ["↑", "1#END", "2#↓", "3#PGDN"]],
+    [["CTRL", "⊞", "ALT"], ["SPACE", "ALT GR", "\\^|"],
+     ["CTRL", "FN", "←"], ["↓", "→", "0#INS", ".#DEL", "⏎#ENTER"]],
 ]
 
 EFFECT_ORDER = ["steady", "breath", "rbreath", "cycle", "wave", "rain",
@@ -684,11 +686,17 @@ SOFTWARE = {"wave", "swave", "scycle", "spulse", "rbreath", "rain",
 
 LIGHT_KEY_CSS = \
     ".light-key { font-family: \"Open Sans Condensed\", \"DejaVu Sans Condensed\", sans-serif;\n" \
-    "  font-stretch: condensed; font-size: 9px; font-weight: 700; letter-spacing: 0.6px;\n" \
+    "  font-stretch: condensed; font-size: 9px; font-weight: 700; letter-spacing: 0.5px;\n" \
     "  padding: 0; border-radius: 5px; border: 1px solid rgba(0,0,0,0.45);\n" \
     "  box-shadow: inset 0 -7px 9px -5px rgba(0,0,0,0.4); }\n" \
-    ".light-key.wasd { border: 2px solid #a06bff; border-radius: 7px;\n" \
-    "  box-shadow: inset 0 -7px 9px -5px rgba(0,0,0,0.35), 0 0 8px rgba(160,107,255,0.55); }\n" \
+    ".light-key.wasd-w { border: 2px solid #6f6fff;\n" \
+    "  box-shadow: inset 0 0 9px rgba(111,111,255,0.65), 0 0 6px rgba(111,111,255,0.4); }\n" \
+    ".light-key.wasd-a { border: 2px solid #a266ff;\n" \
+    "  box-shadow: inset 0 0 9px rgba(162,102,255,0.65), 0 0 6px rgba(162,102,255,0.4); }\n" \
+    ".light-key.wasd-s { border: 2px solid #ff4d5e;\n" \
+    "  box-shadow: inset 0 0 9px rgba(255,77,94,0.6), 0 0 6px rgba(255,77,94,0.35); }\n" \
+    ".light-key.wasd-d { border: 2px solid #ff6a3c;\n" \
+    "  box-shadow: inset 0 0 9px rgba(255,106,60,0.6), 0 0 6px rgba(255,106,60,0.35); }\n" \
     ".light-key.sel { border: 2px solid #9cc7ff; box-shadow: 0 0 8px 1px rgba(120,180,255,0.55); }\n" \
     ".kb-card { background: rgba(127,127,127,0.08); border-radius: 14px;\n" \
     "  border: 1px solid rgba(127,127,127,0.16); }\n" \
@@ -697,14 +705,38 @@ LIGHT_KEY_CSS = \
     "  background: rgba(53,132,228,0.14); }"
 
 
-# Physical-keycap widths in standard key units (1 u ≈ 19 mm); default 1 u
+# Physical-keycap widths in standard key units (1 u ≈ 19 mm); default 1 u.
+# Keyed by the exact KB_ROWS entry (keeps two-legend keys distinct).
 KEY_UNIT = 46  # px per unit — physical scale of the real deck
 KEY_WIDTHS: dict[str, float] = {
-    "ESC": 1.25, "TAB": 1.5, "CAPS": 1.75, "BKSP": 2.0, "ENTER": 2.0,
-    "SHIFT": 2.25, "CTRL": 1.25, "FN": 1.25, "ALT": 1.25, "⊞": 1.25,
-    "SPACE": 5.5, "NUM LK": 1.25, "PRT SCR": 1.25, "⏻": 1.25,
-    "ALT GR": 1.25, "⏎": 1.0,
+    "ESC": 1.25, "PRT SCR": 1.5, "INS": 1.25, "DEL": 1.25, "✻": 1.25,
+    "/": 1.25, "⏻": 1.25, "TAB^⇥": 1.5, "←^BACKSPACE": 2.0,
+    "CAPS LOCK": 1.75, "⏎ ENTER": 2.0, "⇧ SHIFT": 2.25, "CTRL": 1.5,
+    "FN": 1.25, "ALT": 1.25, "ALT GR": 1.25, "⊞": 1.25, "SPACE": 6.25,
+    "+": 1.25, "−": 1.25, "NUM\nLOCK": 1.4, "⏎#ENTER": 1.5,
 }
+
+# hero accent rings for WASD (colors per the deck art)
+WASD_CLASS = {"W": "wasd-w", "A": "wasd-a", "S": "wasd-s", "D": "wasd-d"}
+
+
+def _key_width(entry: str) -> float:
+    if entry in KEY_WIDTHS:
+        return KEY_WIDTHS[entry]
+    main = entry.split("^", 1)[0].split("#", 1)[0]
+    return KEY_WIDTHS.get(main, 1.0)
+
+
+def _key_markup(entry: str) -> str | None:
+    """Two-line keycap legends: 'main^tiny' = tiny above, 'main#tiny' = below."""
+    from xml.sax.saxutils import escape
+    if "^" in entry:
+        main, tiny = entry.split("^", 1)
+        return f'<span size="small">{escape(tiny)}</span>\n{escape(main)}'
+    if "#" in entry:
+        main, tiny = entry.split("#", 1)
+        return f'{escape(main)}\n<span size="small">{escape(tiny)}</span>'
+    return None
 
 
 class KeyboardLayout(Gtk.Box):
@@ -723,12 +755,20 @@ class KeyboardLayout(Gtk.Box):
                 zone = row_idx * 4 + col_idx
                 box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=3)
                 for key in keys:
-                    btn = Gtk.Button(label=key)
+                    btn = Gtk.Button()
                     btn.add_css_class("light-key")
                     btn.add_css_class(f"zb{zone}")
-                    if key in ("W", "A", "S", "D"):
-                        btn.add_css_class("wasd")
-                    w = KEY_UNIT * KEY_WIDTHS.get(key, 1.0)
+                    if key in WASD_CLASS:
+                        btn.add_css_class(WASD_CLASS[key])
+                    mk = _key_markup(key)
+                    if mk is not None:
+                        lbl = Gtk.Label()
+                        lbl.set_markup(mk)
+                        lbl.set_justify(Gtk.Justification.CENTER)
+                        btn.set_child(lbl)
+                    else:
+                        btn.set_label(key)
+                    w = KEY_UNIT * _key_width(key)
                     btn.set_size_request(int(w), 38)
                     btn.set_tooltip_text(f"Zone {zone}")
                     btn.connect("clicked", page.on_zone_clicked, zone)

@@ -291,7 +291,7 @@ def get_engine(name: str, *, speed: float = 6.0, direction: int = 1):
 
 
 def run(engine_name: str, kb: MysticKeyboard, *, speed: float = 6.0,
-        direction: int = 1, fps: int = 12) -> None:
+        direction: int = 1, fps: int = 20) -> None:
     """Block forever painting frames. Exits cleanly on SIGTERM/SIGINT.
 
     Robust against device hiccups: transient write failures never kill the
@@ -307,14 +307,19 @@ def run(engine_name: str, kb: MysticKeyboard, *, speed: float = 6.0,
 
     signal.signal(signal.SIGTERM, _term)
     signal.signal(signal.SIGINT, _term)
-    frame_min = max(0.08, 1.0 / max(1, fps))
+    frame_min = max(0.03, 1.0 / max(1, fps))
     t0 = time.monotonic()
     consecutive_fail = 0
     while not stop["v"]:
         t = time.monotonic() - t0
         try:
             colors = eng.colors(t)
-            kb.steady_zones({z: colors[z] for z in range(NUM_ZONES)})
+            # one single-zone packet per zone per frame: the firmware only
+            # reliably refreshes single-zone effect packets, and the per-zone
+            # speed byte (ignored visually by steady mode) keeps packet
+            # identity unique even when two zones share a color
+            for z in range(NUM_ZONES):
+                kb.steady(colors[z], zones=[z], speed=600 + z)
             consecutive_fail = 0
         except Exception:
             consecutive_fail += 1
@@ -338,7 +343,7 @@ if __name__ == "__main__":
     ap.add_argument("engine", choices=sorted(set(_SOFTWARE_EFFECTS)))
     ap.add_argument("--speed", type=float, default=6.0)
     ap.add_argument("--dir", type=int, default=1)
-    ap.add_argument("--fps", type=int, default=12)
+    ap.add_argument("--fps", type=int, default=20)
     a = ap.parse_args()
     kb = MysticKeyboard()
     try:
