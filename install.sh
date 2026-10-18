@@ -45,7 +45,8 @@ python3 -c 'import gi; gi.require_version("Gtk","4.0"); gi.require_version("Adw"
 echo "==> Installing app files to ${APP_DIR}"
 mkdir -p "$APP_DIR" "$BIN_DIR" "$DESKTOP_DIR" "$ICON_DIR"
 rm -rf "${APP_DIR:?}/mystic_center" "${APP_DIR}/"?* 2>/dev/null || true
-cp -r "$SRC/mystic_center" "$SRC/data" "$SRC/tests" "$SRC/docs" "$APP_DIR/"
+cp -r "$SRC/mystic_center" "$SRC/data" "$SRC/tests" "$SRC/docs" "$SRC/tools" \
+    "$APP_DIR/"
 cp "$SRC/launcher.py" "$SRC/install.sh" "$SRC/README.md" "$APP_DIR/" 2>/dev/null || true
 find "$APP_DIR" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
 

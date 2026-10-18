@@ -20,6 +20,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
 from . import client as daemon_client
+from . import wmi2
 from .lighting import profiles as prof
 from .lighting import effects
 from .lighting.effects import gradient, hex_to_rgb, rgb_to_hex
@@ -440,6 +441,71 @@ class PerfPage(Page):
 
 # ==================================================================== fans
 
+class CurveEditor(Gtk.Frame):
+    """Six (temp °C → duty %) spin rows for one fan, like MSI Center's editor."""
+
+    def __init__(self, fan_label: str, points=None) -> None:
+        super().__init__()
+        self._label = fan_label
+        self._build()
+        self.set_points(points or wmi2.DEFAULT_CPU_CURVE)
+
+    def _build(self) -> None:
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        box.set_margin_top(8)
+        box.set_margin_bottom(8)
+        box.set_margin_start(10)
+        box.set_margin_end(10)
+
+        head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        lbl = Gtk.Label(label=self._label, xalign=0.0)
+        lbl.add_css_class("heading")
+        head.append(lbl)
+        cols = Gtk.Label(label="temp °C   duty %", hexpand=True)
+        cols.set_xalign(1.0)
+        cols.add_css_class("caption")
+        cols.add_css_class("dim-label")
+        head.append(cols)
+        box.append(head)
+
+        self.grid = Gtk.Grid(column_spacing=10, row_spacing=2)
+        self.spins: list[tuple[Gtk.SpinButton, Gtk.SpinButton]] = []
+        box.append(self.grid)
+        self.set_child(box)
+
+    def _ensure_rows(self, n: int = 6) -> None:
+        while len(self.spins) < n:
+            i = len(self.spins)
+            t = self._spin(30, 115, 5, 15)
+            d = self._spin(0, 100, 5, 20)
+            self.grid.attach(t, 0, i, 1, 1)
+            self.grid.attach(d, 1, i, 1, 1)
+            self.spins.append((t, d))
+
+    @staticmethod
+    def _spin(lo: int, hi: int, step: int, page: int) -> Gtk.SpinButton:
+        s = Gtk.SpinButton()
+        s.set_range(lo, hi)
+        s.set_increments(step, page)
+        s.set_digits(0)
+        s.add_css_class("monospace")
+        return s
+
+    def set_points(self, points) -> None:
+        self._ensure_rows()
+        src = list(points) if points else wmi2.DEFAULT_CPU_CURVE
+        for i in range(6):
+            t, d = self.spins[i]
+            pair = src[i] if i < len(src) else src[-1]
+            t.set_value(float(pair[0]))
+            d.set_value(float(pair[1]))
+
+    def get_points(self) -> list[list[int]]:
+        self._ensure_rows()
+        return [[int(t.get_value()), int(d.get_value())]
+                for t, d in self.spins]
+
+
 class FansPage(Page):
     def __init__(self, window):
         super().__init__(window, "weather-wind-symbolic")
@@ -464,6 +530,43 @@ class FansPage(Page):
         g.add(self.boost_row)
         self.boost_row.connect("notify::active", self.on_boost)
 
+        # ---- custom curves (MSI-Center parity, via the WMI2 tables) ----
+        self.curve_switch_row = Adw.SwitchRow(
+            title="Custom fan curve",
+            subtitle="Table-driven control (the interface MSI Center uses) — "
+                     "firmware applies the curve in hardware")
+        self.curve_switch_row.connect("notify::active", self.on_curve_toggle)
+        g.add(self.curve_switch_row)
+
+        self.manual_row = Adw.ActionRow()
+        self.manual_row.set_title("Custom curve is off")
+        self.manual_row.set_subtitle(
+            "Flip it on to enable the six-point CPU/GPU tables below")
+        g.add(self.manual_row)
+
+        self.cpu_editor = CurveEditor("CPU fan")
+        self.gpu_editor = CurveEditor("GPU fan")
+        self._editor_holder = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                                      spacing=10)
+        self._editor_holder.append(self.cpu_editor)
+        self._editor_holder.append(self.gpu_editor)
+        self.col.append(self._editor_holder)
+
+        btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.apply_btn = Gtk.Button(label="Apply curve")
+        self.apply_btn.add_css_class("suggested-action")
+        self.apply_btn.connect("clicked", self.on_apply_curve)
+        self.reset_btn = Gtk.Button(label="MSI defaults")
+        self.reset_btn.connect("clicked", self.on_reset_curve)
+        self.save_btn = Gtk.Button(label="Save profile…")
+        self.save_btn.connect("clicked", self.on_save_profile)
+        self.load_btn = Gtk.Button(label="Apply profile…")
+        self.load_btn.connect("clicked", self.on_apply_profile)
+        for b in (self.apply_btn, self.reset_btn, self.save_btn, self.load_btn):
+            btns.append(b)
+        btns.set_margin_top(4)
+        self.col.append(btns)
+
         g2 = Adw.PreferencesGroup(title="Live")
         self.col.append(g2)
 
@@ -479,35 +582,332 @@ class FansPage(Page):
         self.rpm_row.add_suffix(self.rpm_label)
         g2.add(self.rpm_row)
 
-        note = Gtk.Label(label=(
-            "Note: this EC firmware (2024 platform interface) does not accept "
-            "user fan tables from Linux tools — MSI Center's custom curves on "
-            "Windows go through its WMI interface. Auto/Silent + Cooler Boost "
-            "cover the practical range here."))
-        note.set_xalign(0.0)
-        note.set_wrap(True)
-        note.add_css_class("caption")
-        note.add_css_class("dim-label")
-        g2.add(note)
+        self.watchdog_row = Adw.ActionRow(title="Watchdog")
+        self.watchdog_note = Gtk.Label(label="armed while curve control is on")
+        self.watchdog_note.add_css_class("caption")
+        self.watchdog_note.add_css_class("dim-label")
+        self.watchdog_row.add_suffix(self.watchdog_note)
+        g2.add(self.watchdog_row)
+
+        self.profile_names: list[str] = []
+        self._curve_loaded_once = False
+        self._last_wmi2_error: str | None = None
+        self.connect("map", lambda *_a: self.prefetch_curves())
+
+    # ---- daemon helpers -----------------------------------------------
+
+    def _daemon(self, op: str, **args):
+        with daemon_client.Client() as c:
+            return c.request(op, **args)
+
+    def _background(self, fn, *a, on_done=None):
+        def work():
+            try:
+                out = ("ok", fn(*a))
+            except Exception as e:  # surfaced on the GTK thread
+                out = ("err", str(e))
+            if on_done:
+                GLib.idle_add(on_done, *out)
+        threading.Thread(target=work, daemon=True).start()
+
+    # ---- actions -------------------------------------------------------
 
     def on_fan_mode(self, name: str) -> None:
-        try:
-            with daemon_client.Client() as c:
-                c.request("set_fan_preset", preset=name)
-        except (daemon_client.DaemonDown, RuntimeError) as e:
-            self.window.toast(f"fan preset failed: {e}")
+        def done(kind, payload):
+            if kind == "err":
+                self.window.toast(f"fan preset failed: {payload}")
+        self._background(
+            lambda: self._daemon("set_fan_preset", preset=name),
+            on_done=done)
 
     def on_boost(self, row, *_a):
-        try:
-            with daemon_client.Client() as c:
-                c.request("set_cooler_boost", on=row.get_active())
-        except (daemon_client.DaemonDown, RuntimeError) as e:
-            self.window.toast(f"cooler boost failed: {e}")
-            row.set_active(not row.get_active())
+        def done(kind, payload):
+            if kind == "err":
+                self.window.toast(f"cooler boost failed: {payload}")
+                row.set_active(not row.get_active())
+        self._background(
+            lambda: self._daemon("set_cooler_boost", on=row.get_active()),
+            on_done=done)
+
+    def on_curve_toggle(self, row, *_a):
+        want = row.get_active()
+
+        def done(kind, payload):
+            if kind == "err":
+                self.window.toast(f"custom curve failed: {payload}")
+                GLib.idle_add(self._set_switch_silent, not want)
+                return
+            state = payload or {}
+            manual = bool(state.get("manual", want))
+            GLib.idle_add(self._set_switch_silent, manual)
+            self._refresh_curve_states_from(wait_manual=manual)
+
+        self._background(lambda: self._daemon("fan_curve_manual", on=want),
+                         on_done=done)
+
+    def _set_switch_silent(self, active: bool) -> None:
+        row = self.curve_switch_row
+        if row.get_active() != active:
+            row.handler_block_by_func(self.on_curve_toggle)
+            row.set_active(active)
+            row.handler_unblock_by_func(self.on_curve_toggle)
+
+    def _refresh_curve_states_from(self, wait_manual: bool | None = None) -> None:
+        def fetch():
+            return self._daemon("fan_curve_get")
+
+        def done(kind, payload):
+            if kind == "err":
+                self._last_wmi2_error = payload
+                self.manual_row.set_title("Custom curve unavailable")
+                self.manual_row.set_subtitle(payload)
+                return
+            self._last_wmi2_error = None
+            snap = payload or {}
+            manual = snap.get("manual", False)
+            if wait_manual is not None:
+                manual = wait_manual if snap.get("available") else False
+            self._apply_curve_state(snap, manual)
+
+        self._background(fetch, on_done=done)
+
+    def _apply_curve_state(self, snap: dict, manual: bool) -> None:
+        title = ("Custom curve is ON (watchdog active)"
+                 if manual else "Custom curve is off")
+        self.manual_row.set_title(title)
+        self.manual_row.set_subtitle(
+            "Six-point CPU/GPU tables written straight to the firmware, like "
+            "MSI Center does on Windows"
+            if manual else
+            "Flip it on to enable the six-point CPU/GPU tables below")
+        self._set_switch_silent(manual)
+        for btn in (self.apply_btn, self.reset_btn,
+                    self.save_btn, self.load_btn):
+            btn.set_sensitive(manual)
+        cpu = snap.get("cpu_curve")
+        gpu = snap.get("gpu_curve")
+        if manual:
+            if cpu:
+                self.cpu_editor.set_points(cpu)
+            if gpu:
+                self.gpu_editor.set_points(gpu)
+        elif self._last_wmi2_error is None and cpu and gpu:
+            # previews even when off (firmware stores the last tables)
+            self.cpu_editor.set_points(cpu)
+            self.gpu_editor.set_points(gpu)
+        if snap.get("note"):
+            self.watchdog_note.set_label(str(snap["note"]))
+
+    def prefetch_curves(self) -> None:
+        """Fetch current tables once the page is first shown."""
+        if self._curve_loaded_once:
+            return
+        self._curve_loaded_once = True
+        self._refresh_curve_states_from()
+
+    def on_apply_curve(self, *_a) -> None:
+        cpu = self.cpu_editor.get_points()
+        gpu = self.gpu_editor.get_points()
+        if not self.curve_switch_row.get_active():
+            self.window.toast("enable 'Custom fan curve' first")
+            return
+
+        def done(kind, payload):
+            if kind == "err":
+                self.window.toast(f"apply failed: {payload}")
+            else:
+                self.window.toast("curve written to firmware"
+                                  " (see duty readbacks in a second)")
+        self._background(lambda: self._daemon("fan_curve_set", cpu=cpu,
+                                              gpu=gpu), on_done=done)
+
+    def on_reset_curve(self, *_a) -> None:
+        def done(kind, payload):
+            if kind == "err":
+                self.window.toast(f"reset failed: {payload}")
+            else:
+                self.window.toast("MSI default curve restored")
+                self.cpu_editor.set_points(wmi2.DEFAULT_CPU_CURVE)
+                self.gpu_editor.set_points(wmi2.DEFAULT_GPU_CURVE)
+        self._background(self._daemon("fan_curve_reset"), on_done=done)
+
+    def on_save_profile(self, *_a) -> None:
+        dlg = Adw.Dialog()
+        dlg.set_title("Save fan curve profile")
+        toolbar = Adw.ToolbarView()
+        toolbar.add_top_bar(Adw.HeaderBar(show_title=False))
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.set_margin_top(12)
+        box.set_margin_start(12)
+        box.set_margin_end(12)
+        box.set_margin_bottom(12)
+
+        entry = Adw.EntryRow(title="Profile name")
+        group = Adw.PreferencesGroup(
+            title="Save the current CPU+GPU curve tables")
+        group.add(entry)
+        box.append(group)
+
+        hb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        hb.set_halign(Gtk.Align.END)
+        cancel = Gtk.Button(label="Cancel")
+        save = Gtk.Button(label="Save")
+        save.add_css_class("suggested-action")
+        hb.append(cancel)
+        hb.append(save)
+        box.append(hb)
+
+        toolbar.set_content(box)
+        dlg.set_content_widget(toolbar)
+
+        def do_save(*_a):
+            name = entry.get_text().strip()
+            if not name:
+                entry.add_css_class("error")
+                return
+            try:
+                self._daemon("fan_profile_save", name=name,
+                             data={"cpu": self.cpu_editor.get_points(),
+                                   "gpu": self.gpu_editor.get_points()})
+                self.window.toast(f"saved fan curve '{name}'")
+                dlg.force_close()
+            except Exception as e:
+                self.window.toast(f"save failed: {e}")
+
+        save.connect("clicked", do_save)
+        cancel.connect("clicked", lambda *_a: dlg.force_close())
+        entry.connect("entry-activated", do_save)
+        dlg.present(self.window)
+
+    def on_apply_profile(self, *_a) -> None:
+        def fetch():
+            return self._daemon("fan_profile_list")
+        def done(kind, payload):
+            if kind == "err":
+                self.window.toast(f"profile listing failed: {payload}")
+                return
+            names = (payload or {}).get("profiles") or []
+            if not names:
+                self.window.toast("no saved fan profiles yet")
+                return
+            self._show_apply_dialog(names)
+        self._background(fetch, on_done=done)
+
+    def _show_apply_dialog(self, names: list[str]) -> None:
+        dlg = Adw.Dialog()
+        dlg.set_title("Apply fan curve profile")
+        toolbar = Adw.ToolbarView()
+        toolbar.add_top_bar(Adw.HeaderBar(show_title=False))
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.set_margin_top(12); box.set_margin_start(12)
+        box.set_margin_end(12); box.set_margin_bottom(12)
+
+        row = Adw.ComboRow(title="Profile")
+        model = Gtk.StringList()
+        for n in names:
+            model.append(n)
+        row.set_model(model)
+        row.set_selected(0)
+        group = Adw.PreferencesGroup()
+        group.add(row)
+        box.append(group)
+
+        hb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        hb.set_halign(Gtk.Align.END)
+        cancel = Gtk.Button(label="Cancel")
+        apply = Gtk.Button(label="Apply")
+        apply.add_css_class("suggested-action")
+        hb.append(cancel)
+        hb.append(apply)
+        box.append(hb)
+
+        toolbar.set_content(box)
+        dlg.set_content_widget(toolbar)
+
+        def do_apply(*_a):
+            idx = row.get_selected()
+            if idx == Gtk.INVALID_LIST_POSITION:
+                dlg.force_close()
+                return
+            name = names[idx]
+            try:
+                data = self._daemon("fan_profile_get", name=name)
+                if not self.curve_switch_row.get_active():
+                    self._background(lambda: self._daemon(
+                        "fan_curve_manual", on=True),
+                        on_done=self._manual_fetch_after(name))
+                else:
+                    self._apply_profile_curves(name, data)
+                dlg.force_close()
+            except Exception as e:
+                self.window.toast(f"apply failed: {e}")
+
+        def _manual_fetch_after(name):
+            def done(kind, payload):
+                if kind == "err":
+                    self.window.toast(f"manual-enabling failed: {payload}")
+                    return
+                try:
+                    data = self._daemon("fan_profile_get", name=name)
+                    self._apply_profile_curves(name, data)
+                except Exception as e:
+                    self.window.toast(f"apply failed: {e}")
+            return done
+
+        apply.connect("clicked", do_apply)
+        cancel.connect("clicked", lambda *_a: dlg.force_close())
+        dlg.present(self.window)
+
+    def _apply_profile_curves(self, name: str, data: dict) -> None:
+        cpu = data.get("cpu")
+        gpu = data.get("gpu")
+        if cpu is None or gpu is None:
+            self.window.toast(f"profile '{name}' is empty")
+            return
+        def done(kind, payload):
+            if kind == "err":
+                self.window.toast(f"apply failed: {payload}")
+            else:
+                self.window.toast(f"applied profile '{name}'")
+                self.cpu_editor.set_points(cpu)
+                self.gpu_editor.set_points(gpu)
+        self._background(lambda: self._daemon("fan_curve_set", cpu=cpu,
+                                              gpu=gpu), on_done=done)
+
 
     def refresh(self, snap: dict) -> None:
         modes = snap.get("modes") or {}
         fan_mode = (modes.get("fan") or "auto").lower()
+        fans = snap.get("fans") or {}
+        wmi2_state = snap.get("wmi2") or {}
+
+        manual = bool(wmi2_state.get("manual"))
+        self._set_switch_silent(manual)
+        self.manual_row.set_title(
+            "Custom curve is ON (watchdog active)"
+            if manual else "Custom curve is off")
+        for btn in (self.apply_btn, self.reset_btn, self.save_btn,
+                    self.load_btn):
+            btn.set_sensitive(manual)
+        if wmi2_state.get("note"):
+            self.watchdog_note.set_label(str(wmi2_state["note"]))
+        if wmi2_state.get("error"):
+            self.watchdog_note.set_label(f"interface: {wmi2_state['error']}")
+
+        duty = fans.get("duty") or {}
+        cpu = snap.get("cpu") or {}
+        self.duty_label.set_label(
+            f"{fan_mode} — cpu {fmt(duty.get('cpu'), '%')} / "
+            f"gpu {fmt(duty.get('gpu'), '%')}")
+        rpm = fans.get("rpm")
+        if rpm is None:
+            rpm = wmi2_state.get("rpm")
+        self.rpm_label.set_label(
+            ", ".join(str(r) for r in rpm) + " RPM"
+            if isinstance(rpm, list) and rpm else "—")
+
         active_radio = fan_mode if fan_mode in self.preset_btns.buttons else "auto"
         self.preset_btns.select(active_radio)
 
@@ -516,14 +916,6 @@ class FansPage(Page):
             boost.handler_block_by_func(self.on_boost)
             boost.set_active(bool(modes.get("cooler_boost")))
             boost.handler_unblock_by_func(self.on_boost)
-
-        fans = snap.get("fans") or {}
-        duty = fans.get("duty") or {}
-        rpm = fans.get("rpm")
-        self.duty_label.set_label(
-            f"{fan_mode} — cpu {fmt(duty.get('cpu'), '%')} / "
-            f"gpu {fmt(duty.get('gpu'), '%')}")
-        self.rpm_label.set_label(f"{rpm} RPM" if isinstance(rpm, int) else "—")
 
     def reachability(self, ok, why):
         pass

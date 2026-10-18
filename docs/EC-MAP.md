@@ -47,10 +47,21 @@ history), with fan mode latched to advanced (`0xD4 = 0x8D`):
   generations only.
 
 Conclusion: MSI Center on Windows drives the fans over its **WMI platform
-interface**, not EC bytes. Fan tuning on Linux is limited to what the EC firmware
-offers natively (`auto` / `silent` via msi-ec, plus Cooler Boost) — which is
-exactly what Mystic Center exposes. A future avenue is reverse-engineering the
-WMI-platform methods; the EC byte path is a dead end here.
+interface** (`MSI_ACPI` GUID `ABBC0F6E-…`), not raw EC bytes. The legacy
+MControlCenter EC-table layout (`0x72/0x8A …`) applies to older EC
+generations only, and this firmware **silently ignores** those writes.
+
+> **Post-RE update (2026-10):** the WMI avenue is the real path: the
+> in-kernel `msi_wmi_platform` driver exposes the same methods MSI Center
+> uses (`get/set_fan`, `get/set_temperature`, `get/set_ap`) via debugfs, and
+> BIT(7) of the AP fan-mode flag switches the firmware to the six-point
+> duty/temperature tables. Custom fan curves are therefore **not**
+> a Windows-only feature anymore — implemented in `mystic_center/wmi2.py`
+> (semantics validated against the upstream kernel patch; live probe:
+> `sudo tools/wmi2_probe.py --write-test`, see
+> [`WMI2-MAP.md`](WMI2-MAP.md)). The EC byte path above stays the dead end on
+> this firmware generation; the `0x71`/`0x89` duty registers remain
+> readback-only telemetry.
 
 ## Access summary
 

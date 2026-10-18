@@ -2,18 +2,28 @@
 
 from __future__ import annotations
 
+import json
+import logging
+import os
 import time
 
 from . import battery, msiec, sensors
 from .ecio import ALLOWED, EC, ECError
 from .powersaver import PowerSaver
+from . import wmi2
+
+LOG = logging.getLogger("mystic.ops")
 
 _SHIFT_WAIT_S = 0.4
 _WAIT_MAX_TRIES = 4
 
 _FAN_MODES_WITH_CONTROL = ("auto", "silent")  # EC duty/curve writes are not
-# accepted by this firmware generation (see docs/EC-MAP.md) — "advanced" has
-# nothing to offer without them, so only firmware modes are exposed.
+# accepted by this firmware generation — custom curves go through the WMI2
+# platform interface instead (see docs/WMI2-MAP.md).
+
+PROFILE_DIR = os.path.expanduser(
+    os.environ.get("MYSTIC_PROFILES",
+                   "~/.config/mystic-center/fan-curves"))
 
 
 def _wait_mode(getter, want: str) -> str:
@@ -31,10 +41,35 @@ class PrivOps:
     def __init__(self) -> None:
         self.ec = EC()
         self.saver = PowerSaver()
+        self.wmi = wmi2.WMI2()
+        self.watchdog = wmi2.FanWatchdog(
+            self.wmi, cpu_temp_fn=lambda: sensors.cpu_temp(),
+            log=LOG,
+            extra_revert=lambda: self._park_msiec_auto())
+        self.watchdog.start()
         self.shift_map_note: dict = {}
+        self._manual_saved_tables: dict | None = None
 
     def close(self) -> None:
+        try:
+            self.watchdog.stop_now.set()
+        except Exception:
+            pass
+        try:
+            if self.wmi.available() and self.wmi.ap_fan_mode()["manual"]:
+                self.wmi.set_ap_fan_tables(False)
+                LOG.info("pdata shutdown: manual fan table control released")
+        except Exception as exc:
+            LOG.warning("shutdown fan-table release failed: %s", exc)
         self.ec.close()
+
+    @staticmethod
+    def _park_msiec_auto() -> None:
+        """Keep the legacy msi-ec fan-mode in a defined state after revert."""
+        try:
+            msiec.set_fan_mode("auto")
+        except Exception:
+            pass
 
     # ---- snapshot ---------------------------------------------------------------
 
@@ -61,6 +96,7 @@ class PrivOps:
             "fans": {"rpm": sensors.fan_rpm(),
                      "fan_mode": msiec.fan_mode(),
                      "duty": duty},
+            "wmi2": self._wmi2_state(),
             "system": {"ram": sensors.ram_usage(),
                        "storage": sensors.rootfs_usage()},
             "battery": {
@@ -161,19 +197,151 @@ class PrivOps:
 
     # ---- fans ------------------------------------------------------------------
 
+    def _wmi2_state(self) -> dict:
+        """Cheap WMI2 fan-table state for snapshots (missing keys on error)."""
+        state: dict = {"available": self.wmi.available()}
+        if not self.wmi.available():
+            return state
+        state.update(**self.wmi.quant())
+        try:
+            state["manual"] = self.wmi.ap_fan_mode()["manual"]
+        except (wmi2.WMI2Error, OSError) as exc:
+            state["error"] = str(exc)
+            return state
+        if not state["manual"]:
+            return state
+        state["rpm"] = self._try(self.wmi.fan_rpm)
+        tables = self.wmi.fan_tables()
+        state["cpu_curve"] = self._curve(tables.get("cpu", None),
+                                         self.wmi.temp_table("cpu"))
+        state["gpu_curve"] = self._curve(tables.get("gpu", None),
+                                         self.wmi.temp_table("gpu"))
+        return state
+
+    @staticmethod
+    def _try(fn, *args):
+        try:
+            return fn(*args)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _curve(duty: list[int] | None, temps: list[int] | None):
+        if not duty or not temps:
+            return None
+        pairs = wmi2.sanitize_curve(list(zip(temps, duty)))
+        return pairs
+
+    # -- WMI2 fan table ops --
+
+    def wmi2_inventory(self) -> dict:
+        if not self.wmi.available():
+            raise wmi2.WMI2Error(
+                "msi-wmi-platform debugfs not present — is the msi-wmi-platform"
+                " module loaded on this kernel?")
+        return self.wmi.inventory()
+
+    def fan_curve_get(self) -> dict:
+        resp = dict(self._wmi2_state())
+        return resp
+
+    def fan_curve_set(self, cpu: list[list[int]] | None,
+                      gpu: list[list[int]] | None) -> dict:
+        if not self.wmi.available():
+            raise wmi2.WMI2Error("msi-wmi-platform debugfs not present")
+        cur = self.wmi.ap_fan_mode()
+        if not cur["manual"]:
+            raise RuntimeError(
+                "fan tables are ignored while control is automatic — "
+                "enable the custom-curve fan mode first (manual on)")
+        out: dict = {}
+        if cpu:
+            out["cpu"] = self.wmi.set_fan_table("cpu", [p[1] for p in cpu])
+            self.wmi.set_temp_table("cpu", [p[0] for p in cpu])
+        if gpu:
+            out["gpu"] = self.wmi.set_fan_table("gpu", [p[1] for p in gpu])
+            self.wmi.set_temp_table("gpu", [p[0] for p in gpu])
+        self.watchdog.watching(True)
+        return out
+
+    def fan_curve_manual(self, on: bool) -> dict:
+        if not self.wmi.available():
+            raise wmi2.WMI2Error("msi-wmi-platform debugfs not present")
+        if on:
+            tables = self.wmi.fan_tables()
+            self._manual_saved_tables = {
+                "cpu": tables.get("cpu"), "gpu": tables.get("gpu")}
+            self.wmi.set_ap_fan_tables(True)
+            self.watchdog.watching(True)
+            # Seed the stored curve (or a MSI-default) so fans don't jump.
+            for which, table, temps in (
+                    ("cpu", self._manual_saved_tables["cpu"],
+                     self.wmi.temp_table("cpu")),
+                    ("gpu", self._manual_saved_tables["gpu"],
+                     self.wmi.temp_table("gpu"))):
+                if table and temps:
+                    continue  # firmware already has a curve from before
+                getattr(self.wmi, "set_fan_table")(which, [
+                    p[1] for p in (wmi2.DEFAULT_CPU_CURVE
+                                   if which == "cpu" else wmi2.DEFAULT_GPU_CURVE)])
+        else:
+            self.wmi.set_ap_fan_tables(False)
+            self.watchdog.watching(False)
+            self._park_msiec_auto()
+        return {"manual": self.wmi.ap_fan_mode()["manual"]}
+
+    def fan_curve_reset(self) -> dict:
+        """Rewrite the MSI-Center default curve (both fans)."""
+        return self.fan_curve_set(
+            wmi2.DEFAULT_CPU_CURVE, wmi2.DEFAULT_GPU_CURVE)
+
+    # -- WMI2 fan curve profiles --
+
+    def fan_profile_save(self, name: str, data: dict) -> dict:
+        name = os.path.basename(name.strip())
+        if not name:
+            raise ValueError("empty profile name")
+        os.makedirs(PROFILE_DIR, exist_ok=True)
+        path = os.path.join(PROFILE_DIR, f"{name}.json")
+        with open(path, "w") as fh:
+            json.dump(data, fh, indent=1)
+        return {"saved": path}
+
+    def fan_profile_list(self) -> dict:
+        out = []
+        for fn in sorted(os.listdir(PROFILE_DIR)) if os.path.isdir(PROFILE_DIR) else []:
+            if fn.endswith(".json"):
+                out.append(fn[:-5])
+        return {"profiles": out}
+
+    def fan_profile_get(self, name: str) -> dict:
+        path = os.path.join(PROFILE_DIR, f"{os.path.basename(name)}.json")
+        with open(path) as fh:
+            return json.load(fh)
+
     def set_fan_preset(self, name: str) -> dict:
         name = name.strip().lower()
+        if name == "auto":
+            # leaving manual table control if it was on
+            try:
+                if self.wmi.ap_fan_mode()["manual"]:
+                    self.wmi.set_ap_fan_tables(False)
+                    self.watchdog.watching(False)
+            except (wmi2.WMI2Error, OSError):
+                pass
         if name not in _FAN_MODES_WITH_CONTROL:
             raise ValueError(
                 f"fan preset {name!r} not available on this firmware — "
-                "this EC ignores user duty/curve writes; use cooler boost for "
-                "max cooling")
+                "custom curves are a separate table-driven mode "
+                "(fan-curve manual on)")
         if not msiec.set_fan_mode(name):
             raise RuntimeError("fan_mode write failed (permissions?)")
         return {"now": msiec.fan_mode()}
 
+
     def fan_status(self) -> dict:
-        return {"fan": msiec.fan_mode(), "duty": self._duty()}
+        return {"fan": msiec.fan_mode(), "duty": self._duty(),
+                **self._wmi2_state()}
 
     def _duty(self) -> dict:
         if not self.ec.available():

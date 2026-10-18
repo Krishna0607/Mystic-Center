@@ -113,10 +113,12 @@ class MysticServer(socketserver.ThreadingUnixStreamServer):
 
 
 def main() -> int:
+    global _ops_instance
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s")
     ops = PrivOps()
+    _ops_instance = ops
     server = MysticServer(ops_dispatch=_dispatch_builder(ops))
     LOG.info("mysticd listening on %s", SOCKET_PATH)
 
@@ -128,6 +130,12 @@ def main() -> int:
                 msiec.set_fan_mode("auto")
         except Exception as exc:
             LOG.warning("shutdown fan-mode check failed: %s", exc)
+        try:
+            ops = _ops_instance
+            if ops is not None:
+                ops.close()
+        except Exception as exc:
+            LOG.warning("shutdown ops close failed: %s", exc)
         threading.Thread(target=server.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGTERM, _shutdown)
@@ -183,6 +191,22 @@ def _dispatch_builder(ops: PrivOps):
             return ops.set_fan_preset(args["preset"])
         if op == "fan_status":
             return ops.fan_status()
+        if op == "fan_curve_get":
+            return ops.fan_curve_get()
+        if op == "fan_curve_set":
+            return ops.fan_curve_set(args.get("cpu"), args.get("gpu"))
+        if op == "fan_curve_manual":
+            return ops.fan_curve_manual(bool(args.get("on")))
+        if op == "fan_curve_reset":
+            return ops.fan_curve_reset()
+        if op == "wmi2_inventory":
+            return ops.wmi2_inventory()
+        if op == "fan_profile_save":
+            return ops.fan_profile_save(args["name"], args["data"])
+        if op == "fan_profile_list":
+            return ops.fan_profile_list()
+        if op == "fan_profile_get":
+            return ops.fan_profile_get(args["name"])
         if op == "set_battery_limit":
             return ops.set_battery_limit(int(args["end"]),
                                          args.get("start"))
