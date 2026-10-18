@@ -120,8 +120,8 @@ mystic-center                        # GUI
 | Shift modes (eco/comfort/turbo) | ✅ written, raw codes calibrated (eco 0xC2 · comfort 0xC1 · turbo 0xC4) |
 | Cooler Boost / Super Battery | ✅ via msi-ec |
 | Fan modes (auto/silent) | ✅ firmware-managed, via msi-ec |
-| Custom fan curves | 🟦 implemented — MSI-Center parity via `msi_wmi_platform` (WMI2 tables); semantics verified against kernel patch + decompiled MSI Center; **live hardware probe pending**, run `sudo tools/wmi2_probe.py --write-test` after installing |
+| Custom fan curves | ✅ **live-validated** (2026-10-18) — MSI-Center parity via `msi_wmi_platform` (WMI2 tables); AP-bit round-trip exact (`0x0D`↔`0x8D`), every write readback-verified, duty tables drive real RPM (CPU 2962→4137, GPU 0→2981), clean restore to firmware auto; `sudo tools/wmi2_probe.py --write-test` remains for first-contact checks on fresh machines |
 | Battery charge-limit sliders | ✅ kernel interface; values verified |
-| 24-zone RGB keyboard | ✅ verified core — 🟦 full MSI-Center parity set (wave, dance, wheel, bouncy ball, Customize, all-sync, Save/Revert to MCU) implemented, packet-level tests passing; live check of the new effects pending |
+| 24-zone RGB keyboard | ✅ full MSI-Center parity set (wave, dance, wheel, bouncy ball, Customize, all-sync, Save/Revert to MCU) — live-verified on hardware incl. wave parameter sweep and both directions (2026-10-18); packet-level parity tests passing |
 | Webcam / Fn-side swap | ✅ via msi-ec |
 | Autostart + packaging | ✅ systemd service + .desktop |

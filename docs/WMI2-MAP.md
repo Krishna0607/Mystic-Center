@@ -119,6 +119,27 @@ sudo tools/wmi2_probe.py --write-test   # temporary curve + restore
 Then the daemonized path (`mystic-center wmi2`, `mystic-center fan-curve ...`)
 and the GUI Fans page.
 
+## Live validation (2026-10-18, MS-15P2, EC `15P2EMS1.110`)
+
+Scripted through the running daemon (root-side, no sudo needed): baseline
+(auto) → manual ON with unchanged tables → test duties `65..90 %` → restore
+→ manual OFF. Fans audibly ramped; everything was restored.
+
+- **AP bit**: flags `0x0D` → `0x8D` (BIT(7) set) → `0x0D` — exact
+  round-trip, no other bits touched.
+- **Duty writes reach the EC**: the test curve drove CPU tach
+  2962 → 4137 RPM and the second (GPU) tach 0 → 2981 RPM from its zero-fan
+  idle; every write was readback-verified by `set_fan_table` /
+  `set_temp_table`.
+- **Restore**: captured duty tables written back byte-exact, AP bit
+  cleared, RPMs returned to the auto regime (CPU ~2900 @ 48 %).
+- **One sanitizer normalisation**: the firmware's leading temp point is a
+  placeholder `0`; `set_temp_table` floors point temps at 30 °C, so after
+  any curve write that byte reads 30 — identical first-segment behaviour,
+  and irrelevant while the AP bit is clear.
+- **Watchdog**: armed at daemon start (`fan watchdog armed` in the
+  journal), never fired (temps stayed < 60 °C).
+
 Reference: kernel driver `msi-wmi-platform.c` (in-tree) + fan-control draft
 (`ogc-linux/drivers/platform/x86/msi-wmi-platform.c`, commit `c549695`) —
 root of the offset conventions documented above.

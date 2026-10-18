@@ -222,11 +222,13 @@ Notebook-relevant modules and their Linux status:
   service-side quirks we can't see.
 - The two reserved bytes inside fan table packages (`buf[1]`, `buf[8..9]`)
   and temp packages (`buf[2..3]`) are preserved rather than interpreted.
-- Fan curves on this firmware were not yet probed on the live Linux machine
-  (needs root) — the probe is `sudo tools/wmi2_probe.py` (+`--write-test`);
-  until then, treat the duty/temp table mapping as *high confidence from two
-  independent sources (patch + service protocol), still awaiting a hardware
-  round-trip*.
+- Fan curves on this firmware are now **live-validated** (2026-10-18,
+  through the running daemon): AP-bit round-trip `0x0D`↔`0x8D`, test duties
+  `65..90 %` drove the CPU tach 2962→4137 RPM and the GPU fan 0→2981 RPM
+  from zero-fan idle, duty tables restored byte-exact. The patch + service
+  protocol agree and the hardware round-trip confirms them;
+  `sudo tools/wmi2_probe.py` (+`--write-test`) remains the first-contact
+  check for fresh machines.
 - `DetectTransferSpeed` (TCP) and a couple of CentralServer plugin-id tables
   were mapped only far enough to explain dispatch; a full command-id catalogue
   is out of scope for the port.
