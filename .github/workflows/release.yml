@@ -1,0 +1,44 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build and attach the Arch package to'
+        required: true
+        default: 'v1.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  arch-package:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    steps:
+      - name: Install tooling
+        run: pacman -Sy --noconfirm --needed git curl
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Build Arch package
+        run: |
+          # makepkg refuses to run as root; build as an unprivileged user
+          useradd -m builder
+          chown -R builder:builder .
+          su - builder -c "cd \"$PWD/packaging/aur\" && makepkg -f --nodeps --noconfirm"
+          cp packaging/aur/*.pkg.tar.zst .
+          sha256sum *.pkg.tar.zst > sha256sums.txt
+          cat sha256sums.txt
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          name: ${{ inputs.tag || github.ref_name }}
+          fail_on_unmatched_files: true
+          files: |
+            *.pkg.tar.zst
+            sha256sums.txt

@@ -113,27 +113,23 @@ Start the GUI with `mystic-center` (or the **Mystic Center** icon).
 
 ### Arch Linux package
 
-A system-wide package is prepared in [`packaging/aur/`](packaging/aur)
-(same result as `install.sh --system`). AUR account registration is
-currently closed upstream, so until the AUR package can be uploaded:
+The [`packaging/aur/`](packaging/aur) directory contains the `mystic-center`
+PKGBUILD (same result as `install.sh --system`). Build and install it with:
 
-- **Prebuilt package** from the [latest release](https://github.com/Krishna0607/Mystic-Center/releases/latest):
+```bash
+git clone https://github.com/Krishna0607/Mystic-Center.git
+cd Mystic-Center/packaging/aur
+makepkg -si
+```
 
-  ```bash
-  curl -LO https://github.com/Krishna0607/Mystic-Center/releases/download/v1.0.0/mystic-center-1.0.0-1-any.pkg.tar.zst
-  sudo pacman -U mystic-center-1.0.0-1-any.pkg.tar.zst
-  ```
+Prebuilt packages are attached to
+[releases](https://github.com/Krishna0607/Mystic-Center/releases) when
+available — install with `sudo pacman -U mystic-center-*.pkg.tar.zst`. An AUR
+submission is prepared as well; it will be uploaded once new-account
+registration at the AUR reopens (currently closed upstream).
 
-- Or **build it yourself** from the included PKGBUILD:
-
-  ```bash
-  git clone https://github.com/Krishna0607/Mystic-Center.git
-  cd Mystic-Center/packaging/aur
-  makepkg -si
-  ```
-
-Both install `/usr/bin/mystic-center`, the systemd service, the udev rule
-and the `ec_sys` write-support option. Afterwards run
+The package installs `/usr/bin/mystic-center`, the systemd service, the udev
+rule and the `ec_sys` write-support option. Afterwards run
 `sudo systemctl enable --now mystic-center.service` and log out and back in
 once for the keyboard ACL (or reboot, which also applies `ec_sys`).
 Requirements are unchanged — see [Requirements](#requirements).
