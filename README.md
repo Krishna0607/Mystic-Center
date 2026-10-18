@@ -35,20 +35,113 @@ The MSI WMI2 platform interface (custom fan curves) is in
 [`docs/WMI2-MAP.md`](docs/WMI2-MAP.md); the full MSI Center teardown that
 motivated it is in [`docs/MSI-CENTER-RE.md`](docs/MSI-CENTER-RE.md).
 
-## Install
+## Requirements
+
+### Hardware
+
+- **MSI Crosshair 16 HX D14V** (`MS-15P2`) with the 24-zone per-key RGB
+  keyboard (HID `1462:1603`) and EC firmware `15P2EMS1.110` — everything here
+  is developed and hardware-verified against this exact configuration.
+- Other MSI laptops with per-key RGB keyboards may work, but EC behaviour is
+  model-specific — treat other models as untested.
+
+### Software
+
+A systemd Linux distribution (developed on CachyOS, kernel 7.2.x):
+
+| Need | How to check | What it enables |
+|---|---|---|
+| Python 3.10+ | `python3 --version` | everything |
+| PyGObject + GTK 4 + libadwaita | `python3 -c 'import gi; gi.require_version("Gtk","4.0"); gi.require_version("Adw","1")'` | the GUI (`install.sh` refuses to run without it) |
+| `msi-ec` kernel driver | `ls /sys/devices/platform/msi-ec` | platform modes, battery limits, fan modes, webcam/Fn switches |
+| `msi_wmi_platform` + debugfs | `ls /sys/kernel/debug/msi-wmi-platform-*` | custom fan curves (WMI2 tables). If missing, everything except custom fan curves still works, and the app tells you why. |
+| `ec_sys` write support | `cat /sys/module/ec_sys/parameters/write_support` → `Y` | advanced fan mode; installed by `install.sh --system` (a reboot may be needed once for the module to come up with `write_support=1`) |
+| `wheel` group | `id -nG \| grep -w wheel` | the daemon accepts RPC from root and `wheel` members (default on Arch/Fedora; otherwise `sudo usermod -aG wheel $USER` + re-login) |
+| hidraw access to the keyboard | `lsusb -d 1462:1603`, `ls /dev/hidraw*` | keyboard lighting; granted by the udev rule from `install.sh --system` |
+| `nvidia-smi` (optional) | `nvidia-smi -L` | GPU temps/usage in the overview |
+| `git`, `sudo` | — | clone + install |
+
+GUI packages per distribution (the CLI and daemon need only Python itself):
 
 ```bash
-cd ~/mystic-center
-./install.sh              # user parts (GUI + CLI + autostart-ready .desktop)
-sudo ./install.sh --system  # systemd service + ec_sys write_support + udev rule
+# Arch / CachyOS
+sudo pacman -S python-gobject gtk4 libadwaita
+# Fedora
+sudo dnf install python3-gobject gtk4 libadwaita
+# Ubuntu / Debian (24.04+ has the libadwaita bindings)
+sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1
 ```
 
-The service starts automatically. Check with:
+Not affiliated with MSI — everything was reverse-engineered for interoperability.
+Read the [safety notes](#safety-notes) before enabling EC writes.
+
+## Installation
 
 ```bash
-mystic-center status
+git clone https://github.com/Krishna0607/mystic-center.git
+cd mystic-center
+
+./install.sh                # user parts: app, CLI, desktop entry, icon
+sudo ./install.sh --system  # root parts: systemd service, udev rule, EC access
+```
+
+What the two steps do:
+
+- `./install.sh` — checks the Python/GTK4 dependencies, removes the legacy
+  `mystic-control` app if present (your saved keyboard state in
+  `~/.config/mystic-control/` is kept), installs the app to
+  `~/.local/share/mystic-center`, the `mystic-center` command to
+  `~/.local/bin`, and the desktop entry + icon.
+- `sudo ./install.sh --system` — writes `mystic-center.service` (the
+  privileged backend), the `ec_sys` modprobe option with write support, the
+  udev rule that gives the active seat user access to the RGB keyboard's
+  hidraw node, then enables and starts the service.
+
+After the first install, log out and back in once (or run
+`sudo udevadm control --reload && sudo udevadm trigger -c add -s hidraw`) so
+your session picks up the keyboard ACL.
+
+Check everything:
+
+```bash
+mystic-center status                # live snapshot through the daemon
 systemctl status mystic-center
+journalctl -u mystic-center -n 30   # if it is not active
 ```
+
+Start the GUI with `mystic-center` (or the **Mystic Center** icon).
+
+### Optional: re-apply lighting at login
+
+```bash
+mkdir -p ~/.config/autostart
+cat > ~/.config/autostart/mystic-center-light.desktop <<'DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Mystic Center (lighting)
+Comment=Re-apply keyboard lighting profile at login
+Exec=sh -c "$HOME/.local/bin/mystic-center lighting apply"
+Terminal=false
+X-GNOME-Autostart-enabled=true
+DESKTOP
+```
+
+### Uninstall
+
+```bash
+rm -rf ~/.local/share/mystic-center ~/.local/bin/mystic-center \
+       ~/.local/share/applications/mystic-center.desktop \
+       ~/.config/autostart/mystic-center-light.desktop
+sudo systemctl disable --now mystic-center
+sudo rm -f /etc/systemd/system/mystic-center.service \
+           /etc/udev/rules.d/61-mystic-control.rules \
+           /usr/lib/modprobe.d/mystic-center.conf \
+           /usr/lib/modules-load.d/mystic-center.conf
+sudo systemctl daemon-reload && sudo udevadm control --reload
+```
+
+Your saved keyboard state (`~/.config/mystic-control/`) and the EC's own
+settings are left untouched.
 
 ## CLI
 
@@ -125,3 +218,7 @@ mystic-center                        # GUI
 | 24-zone RGB keyboard | ✅ full MSI-Center parity set (wave, dance, wheel, bouncy ball, Customize, all-sync, Save/Revert to MCU) — live-verified on hardware incl. wave parameter sweep and both directions (2026-10-18); packet-level parity tests passing |
 | Webcam / Fn-side swap | ✅ via msi-ec |
 | Autostart + packaging | ✅ systemd service + .desktop |
+
+## Author
+
+**Krishna Dave** — [@Krishna0607](https://github.com/Krishna0607) · krishna.dave0607@gmail.com
