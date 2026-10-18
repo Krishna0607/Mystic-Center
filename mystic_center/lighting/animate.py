@@ -54,7 +54,7 @@ class RainbowWave:
     name = "wave"
 
     def __init__(self, direction: int = 1, speed: float = 6.0,
-                 col_span: float = 90.0, light: float = 0.55):
+                 col_span: float = 90.0, light: float = 0.62):
         self.direction = 1 if direction == 1 else -1
         self.period = max(1.0, float(speed))  # seconds per full hue loop
         self.span = col_span
@@ -73,7 +73,7 @@ class RainbowCycle:
 
     name = "scycle"
 
-    def __init__(self, speed: float = 6.0, sat: float = 1.0, light: float = 0.55):
+    def __init__(self, speed: float = 6.0, sat: float = 1.0, light: float = 0.62):
         self.period = max(1.0, float(speed))
         self.sat, self.light = sat, light
 
@@ -101,18 +101,19 @@ class RainbowBreathPulse:
 
 class RainbowBreath:
     """Rainbow Breathing — the board breathes in brightness while the hue
-    slowly rotates through the whole spectrum."""
+    slowly rotates through the whole spectrum. Keeps a visible floor so it
+    never reads as "frozen dark"."""
 
     name = "rbreath"
 
-    def __init__(self, speed: float = 6.0, light: float = 0.55):
+    def __init__(self, speed: float = 6.0, light: float = 0.62):
         self.period = max(1.0, float(speed))
         self.light = light
 
     def colors(self, t: float) -> list[str]:
         phase = (t / self.period) % 1.0
         glow = 0.5 - 0.5 * math.cos(2 * math.pi * phase)
-        glow = 0.10 + 0.90 * glow  # never fully dark
+        glow = 0.45 + 0.55 * glow  # brightness floor: never dark-locked
         hue = (t / (self.period * 2.5)) * 360.0
         return [hexc(hue, 1.0, self.light * glow)] * NUM_ZONES
 
@@ -134,7 +135,7 @@ class Fire:
         for z in range(NUM_ZONES):
             w = 0.5 + 0.5 * math.sin(t * self.freq[z] * self.rate + self.phase[z])
             hue = 45.0 - 32.0 * w  # 45° (amber) hot → 13° (red) calm
-            out.append(quantize(hexc(hue, 1.0, 0.30 + 0.30 * w), 24))
+            out.append(quantize(hexc(hue, 1.0, 0.42 + 0.42 * w), 20))
         return out
 
 
@@ -155,8 +156,8 @@ class Rain:
 
     def _pix(self, z: int) -> str:
         if self.val[z] <= 0.0:
-            return "000000"
-        return quantize(hexc(self.hue[z], 1.0, 0.10 + 0.50 * self.val[z]), 16)
+            return quantize("000000", 24)
+        return quantize(hexc(self.hue[z], 1.0, 0.22 + 0.68 * self.val[z]), 20)
 
     def colors(self, t: float) -> list[str]:
         dt = min(0.35, max(0.0, t - self.prev_t))
@@ -190,10 +191,10 @@ class Radar:
             d = head - col
             val = 1.0 - d / 2.6 if 0.0 <= d <= 2.6 else 0.0
             if val <= 0.01:
-                out.append("000000")
+                out.append(quantize("000000", 24))
             else:
                 out.append(quantize(
-                    hexc(self.hue + 25.0 * val, 1.0, 0.10 + 0.50 * val), 16))
+                    hexc(self.hue + 25.0 * val, 1.0, 0.18 + 0.62 * val), 20))
         return out
 
 
@@ -239,11 +240,11 @@ class Lightning:
         for z in range(NUM_ZONES):
             val = self._decay(z, t)
             if val <= 0.02:
-                out.append("000000")
+                out.append(quantize("000000", 24))
             else:
                 out.append(quantize(
                     hexc(self.FLASH_HUE, self.FLASH_SAT,
-                         0.35 + 0.45 * val), 16))
+                         0.45 + 0.45 * val), 20))
         return out
 
 
@@ -275,7 +276,11 @@ def get_engine(name: str, *, speed: float = 6.0, direction: int = 1):
 
 def run(engine_name: str, kb: MysticKeyboard, *, speed: float = 6.0,
         direction: int = 1, fps: int = 12) -> None:
-    """Block forever painting frames. Exits cleanly on SIGTERM/SIGINT."""
+    """Block forever painting frames. Exits cleanly on SIGTERM/SIGINT.
+
+    Robust against device hiccups: transient write failures never kill the
+    animator mid-packet (which would leave the MCU half-painted); only after
+    40 consecutive failed frames it gives up and closes the device."""
     import signal
 
     eng = get_engine(engine_name, speed=speed, direction=direction)
@@ -286,20 +291,25 @@ def run(engine_name: str, kb: MysticKeyboard, *, speed: float = 6.0,
 
     signal.signal(signal.SIGTERM, _term)
     signal.signal(signal.SIGINT, _term)
-    frame_min = 1.0 / max(1, fps)
+    frame_min = max(0.08, 1.0 / max(1, fps))  # see below: pace + floor
     t0 = time.monotonic()
+    consecutive_fail = 0
     while not stop["v"]:
         t = time.monotonic() - t0
-        colors = eng.colors(t)
-        kb.steady_zones({z: colors[z] for z in range(NUM_ZONES)})
-        # software engines can compute more colors than the bus absorbs at
-        # high fps; a modest dynamic cap keeps the HID queue drained
-        over = max(0, len({c for c in colors}) - 7)
-        if over:
-            time.sleep(min(0.045, over * 0.004))
+        try:
+            colors = eng.colors(t)
+            kb.steady_zones({z: colors[z] for z in range(NUM_ZONES)})
+            consecutive_fail = 0
+        except Exception:
+            consecutive_fail += 1
+            time.sleep(0.05)
+            if consecutive_fail >= 40:
+                break  # device genuinely unhealthy; exit with the flag up
+            continue
         next_t = time.monotonic() + frame_min
+        # paced wait, resumable by SIGTERM (signal wakes the sleep)
         while not stop["v"] and time.monotonic() < next_t:
-            time.sleep(0.004)
+            time.sleep(min(0.04, max(0.004, next_t - time.monotonic())))
     kb.off()
 
 

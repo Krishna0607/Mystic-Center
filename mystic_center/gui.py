@@ -131,7 +131,7 @@ class Page(Gtk.ScrolledWindow):
         super().__init__(vexpand=True)
         self.window = window
         self.icon_name = icon
-        self.clamp = Adw.Clamp(maximum_size=960, tightening_threshold=720)
+        self.clamp = Adw.Clamp(maximum_size=1160, tightening_threshold=980)
         self.set_child(self.clamp)
         self.col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         self.col.set_margin_top(12)
@@ -679,36 +679,47 @@ SPEED_TITLES = {
 SOFTWARE = {"wave", "swave", "scycle", "spulse", "rbreath", "rain",
             "fire", "radar", "lightning"}
 
-LIGHT_KEY_CSS = ".light-key { font-size: 8px; padding: 2px 4px; " \
-    "min-width: 0; min-height: 27px; border-radius: 5px;\n" \
-    "  border: 1px solid rgba(0,0,0,0.45); box-shadow: inset 0 -6px 8px -4px rgba(0,0,0,0.35); }\n" \
-    ".light-key.sel { border: 2px solid #9cc7ff; box-shadow: 0 0 7px 1px rgba(120,180,255,0.55); }\n" \
+LIGHT_KEY_CSS = ".light-key { font-size: 10px; font-weight: 500; padding: 0; border-radius: 6px;\n" \
+    "  border: 1px solid rgba(0,0,0,0.45); box-shadow: inset 0 -7px 9px -5px rgba(0,0,0,0.4); }\n" \
+    ".light-key.sel { border: 2px solid #9cc7ff; box-shadow: 0 0 8px 1px rgba(120,180,255,0.55); }\n" \
     ".kb-card { background: rgba(127,127,127,0.08); border-radius: 14px;\n" \
     "  border: 1px solid rgba(127,127,127,0.16); }\n" \
-    ".effect-tile { border-radius: 12px; padding-left: 8px; padding-right: 8px; }\n" \
+    ".effect-tile { border-radius: 12px; padding-left: 10px; padding-right: 10px; }\n" \
     ".effect-tile.active { border: 2px solid #3584e4;\n" \
     "  background: rgba(53,132,228,0.14); }"
 
 
+# Physical-keycap widths in standard key units (1 u ≈ 19 mm); default 1 u
+KEY_UNIT = 46  # px per unit — physical scale of the real deck
+KEY_WIDTHS: dict[str, float] = {
+    "Esc": 1.25, "Tab": 1.5, "Caps": 1.75, "Bksp": 2.0, "⏎": 2.0,
+    "⇧": 2.25, "Ctrl": 1.25, "Fn": 1.25, "Alt": 1.25, "⊞": 1.25,
+    "Space": 5.5, "Nlk": 1.25, "0": 2.0,
+    "Del": 1.25, "PgUp": 1.25, "PgDn": 1.25,
+}
+
+
 class KeyboardLayout(Gtk.Box):
-    """24-zone reference drawn as a physical keyboard; keys are clickable
-    zone selectors and preview colors live in the .zbN css rules."""
+    """24-zone reference drawn as a physical keyboard at real-keycap scale;
+    keys are clickable zone selectors and preview colors live in the .zbN
+    css rules."""
 
     def __init__(self, page: "LightingPage"):
-        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         self.page = page
         self.key_buttons: dict[int, list[Gtk.Button]] = {}
         for row_idx, row_zones in enumerate(KB_ROWS):
-            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=3)
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
             row.set_halign(Gtk.Align.CENTER)
             for col_idx, keys in enumerate(row_zones):
                 zone = row_idx * 4 + col_idx
-                box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=1)
-                box.set_halign(Gtk.Align.CENTER)
+                box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=3)
                 for key in keys:
                     btn = Gtk.Button(label=key)
                     btn.add_css_class("light-key")
                     btn.add_css_class(f"zb{zone}")
+                    w = KEY_UNIT * KEY_WIDTHS.get(key, 1.0)
+                    btn.set_size_request(int(w), 38)
                     btn.set_tooltip_text(f"Zone {zone}")
                     btn.connect("clicked", page.on_zone_clicked, zone)
                     self.key_buttons.setdefault(zone, []).append(btn)
@@ -780,7 +791,7 @@ class LightingPage(Page):
         self.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.NEVER)
 
         # ---- top half: status + keyboard reference (fixed) -----------------
-        upper = Adw.Clamp(maximum_size=1180, tightening_threshold=940)
+        upper = Adw.Clamp(maximum_size=1240, tightening_threshold=980)
         upper_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         upper.set_child(upper_box)
         main.append(upper)
@@ -797,15 +808,15 @@ class LightingPage(Page):
 
         card = Adw.Bin()
         card.add_css_class("kb-card")
-        holder = Gtk.Box()
-        holder.set_halign(Gtk.Align.CENTER)
-        holder.set_margin_top(10)
-        holder.set_margin_bottom(10)
-        holder.set_margin_start(10)
-        holder.set_margin_end(10)
         self.kb_layout = KeyboardLayout(self)
-        holder.append(self.kb_layout)
-        card.set_child(holder)
+        kb_scroll = Gtk.ScrolledWindow()
+        kb_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
+        kb_scroll.set_margin_top(10)
+        kb_scroll.set_margin_bottom(10)
+        kb_scroll.set_margin_start(10)
+        kb_scroll.set_margin_end(10)
+        kb_scroll.set_child(self.kb_layout)
+        card.set_child(kb_scroll)
         upper_box.append(card)
 
         lg_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
@@ -835,7 +846,7 @@ class LightingPage(Page):
         bottom = Gtk.ScrolledWindow()
         bottom.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         bottom.set_vexpand(True)
-        bottom_clamp = Adw.Clamp(maximum_size=1180, tightening_threshold=940)
+        bottom_clamp = Adw.Clamp(maximum_size=1240, tightening_threshold=980)
         col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         col.set_margin_top(4)
         col.set_margin_bottom(24)
@@ -1459,7 +1470,15 @@ def _raw_is_active() -> str:
 class CenterWindow(Adw.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app, title=APP_NAME)
-        self.set_default_size(1120, 760)
+        self.set_default_size(1240, 830)
+        self.set_size_request(940, 700)
+
+        # F11 fullscreen toggle (and app-positioned full-width layout)
+        self.install_action("win.toggle-fullscreen", None, self._toggle_fullscreen)
+        app_obj = self.get_application()
+        if app_obj is not None:
+            app_obj.set_accels_for_action(
+                "win.toggle-fullscreen", ["F11"])
 
         layout = Adw.ToolbarView()
         header = Adw.HeaderBar()
@@ -1540,6 +1559,12 @@ class CenterWindow(Adw.ApplicationWindow):
     def _retry_now(self, *_a) -> None:
         self.banner.set_revealed(False)
         self._apply_snap(None, "manual retry pending")
+
+    def _toggle_fullscreen(self, *_a) -> None:
+        if self.is_fullscreen():
+            self.unfullscreen()
+        else:
+            self.fullscreen()
 
     def _on_close(self, *_a) -> bool:
         self._closed = True
