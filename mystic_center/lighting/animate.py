@@ -1,7 +1,7 @@
 """Software-driven 24-zone animations over the HID feature path.
 
-The firmware's hardware wave is coarse (2–3 visible bands), so MSI-style
-effects are painted per frame from software: each engine computes the 24
+Some effects run in the keyboard's own firmware (MysticKeyboard methods);
+the rest are painted per frame from software: each engine computes the 24
 zone colors and they are sent with steady zone packets.
 
 Packet contract (validated on this machine's firmware): the device refreshes
@@ -13,7 +13,16 @@ therefore produces 24 distinct per-zone colors per frame — the invisible
 uniform or dark frames keep every zone on its own mask.
 
 Frame loop: each frame, the engine's 24 colors go out as one
-MysticKeyboard.steady_zones call (a packet per zone).
+MysticKeyboard.steady_zones call (a packet per zone), paced at 12 fps —
+the frame rate and packet shape on which hardware animation was verified.
+
+Engines: `RainbowBands` ("rainbow") only previews the effect the keyboard's
+own MCU runs — MysticKeyboard.rainbow() configures one colour cycle per
+zone, phase-offset by zone-column (a stream of up to 5 random band colours
+marching sideways) — and nothing runs on the host for it. Everything else
+in this module streams steady frames from software. Every engine keeps 24
+distinct per-zone colours per frame (the invisible `hexc_unique` fold) →
+see its docstring.
 """
 
 from __future__ import annotations
@@ -23,6 +32,8 @@ import math
 import random
 import time
 
+from . import effects
+from .effects import hex_to_rgb
 from .keyboard import NUM_ZONES, MysticKeyboard
 
 N_COLS = 4  # zone columns per hardware row (row-major: zone i → row i//4)
@@ -49,35 +60,70 @@ def hexc_unique(hue: float, sat: float, light: float, z: int) -> str:
     return "%02X%02X%02X" % (r, g, b)
 
 
-class RainbowWave:
-    """Wave: four clean rainbow bands flowing left→right across the deck.
+class RainbowBands:
+    """On-screen preview of the firmware rainbow band conveyor
+    (MysticKeyboard.rainbow): samples the same stream the MCU runs — one
+    band colour per zone-column (row-major hardware: the travel axis is
+    z % 4), all six rows of a column matching, marching sideways one band
+    step at a time; a new colour enters at the trailing edge only when the
+    leading colour has fully exited. Nothing is streamed to the keyboard
+    for this effect: the firmware animates it itself; this class only
+    mirrors it for the GUI preview.
 
-    Palette and column order follow the official MSI deck art: violet →
-    cyan-blue → yellow-green → orange-red from left to right (-95° per
-    zone-column, starting at 285° violet), phase drift travels the rainbow.
-    Each zone's packet color stays distinct via the invisible low-bit fold
-    (single-zone masks — the firmware refresh contract)."""
+    The per-zone low-bit fold is applied anyway so, if this engine is ever
+    streamed as steady frames (daemon fallback), every frame still keeps
+    all 24 zones on their own single-zone packet."""
 
-    name = "wave"
+    name = "rainbow"
+    DEFAULT_COLORS = ("7A00FF", "00C8FF", "3EFF00", "FFA500", "FF0024")
 
-    def __init__(self, direction: int = 1, speed: float = 6.0,
-                 light: float = 0.60):
+    def __init__(self, colors=None, direction: int = 1, speed: float = 6.0):
         self.direction = 1 if direction == 1 else -1
-        self.period = max(1.0, float(speed))  # seconds per full hue lap
-        self.light = light
+        self.period = max(3.0, float(speed))  # seconds per full band lap
+        pal: list[tuple[int, int, int]] = []
+        for c in (colors or self.DEFAULT_COLORS):
+            try:
+                pal.append(hex_to_rgb(c) if isinstance(c, str)
+                           else tuple(int(v) for v in c[:3]))
+            except Exception:
+                continue
+        if len(pal) < 2:
+            pal = [hex_to_rgb(c) for c in self.DEFAULT_COLORS]
+        self.rgb = pal[:effects.BAND_COUNT]
+        self.n = len(self.rgb)
+        self.rotate = -1 if self.direction == 1 else 1
+        seg = 100 // self.n
+        fade = max(1, min(seg // 5, seg - 2))
+        self.hold_frac = (seg - fade) / seg  # slot fraction held solid
 
     def colors(self, t: float) -> list[str]:
-        # Palette and order follow the MSI "Strike with precision" deck art:
-        # violet → blue/cyan → yellow/green → orange/red from left to right
-        # (columns step by -95°: 285° violet, 190° cyan-blue, 95° yellow-green,
-        # 0° orange-red). Phase drift flows the rainbow across the deck; each
-        # zone's packet color stays unique via the invisible low-bit fold.
-        shift = 360.0 * self.direction * (t / self.period)
+        u = t * self.n / self.period           # band-slot coordinate
+        k = int(math.floor(u))
+        frac = u - k
+        slot_in_lap = k % self.n
         out = []
         for z in range(NUM_ZONES):
             col = z % N_COLS
-            out.append(hexc_unique(285.0 - 95.0 * col + shift, 1.0,
-                                   self.light, z))
+            idx = (col + self.rotate * slot_in_lap) % self.n
+            r0, g0, b0 = self.rgb[idx]
+            if slot_in_lap == self.n - 1:
+                # final slot: firmware table has no hold there — it blends
+                # across the wrap into keyframe 0's colour
+                f = frac
+            else:
+                f = (frac - self.hold_frac) / max(1e-6, 1.0 - self.hold_frac)
+                f = min(1.0, max(0.0, f))
+            if f > 0.0:
+                r1, g1, b1 = self.rgb[(idx + self.rotate) % self.n]
+                r0 += (r1 - r0) * f
+                g0 += (g1 - g0) * f
+                b0 += (b1 - b0) * f
+            r = int(round(r0))
+            g = int(round(g0))
+            b = int(round(b0))
+            r = (r & 0b11111100) | (z & 0x03)
+            b = (b & 0b11111000) | ((z >> 2) & 0x07)
+            out.append("%02X%02X%02X" % (r, g, b))
         return out
 
 
@@ -265,25 +311,28 @@ class Lightning:
 
 
 _ENGINES: dict[str, type] = {
-    "wave": RainbowWave, "swave": RainbowWave, "rainbow-wave": RainbowWave,
+    "rainbow": RainbowBands,
     "scycle": RainbowCycle, "rainbow-cycle": RainbowCycle,
     "spulse": RainbowBreathPulse, "rbreath": RainbowBreath,
     "rain": Rain, "fire": Fire, "radar": Radar, "lightning": Lightning,
 }
 
-_SOFTWARE_EFFECTS = ("wave", "swave", "scycle", "spulse",
-                     "rbreath", "rain", "fire", "radar", "lightning")
+_SOFTWARE_EFFECTS = ("scycle", "spulse", "rbreath",
+                     "rain", "fire", "radar", "lightning")
 
 
 def is_software(effect: str) -> bool:
     return effect in _SOFTWARE_EFFECTS
 
 
-def get_engine(name: str, *, speed: float = 6.0, direction: int = 1):
+def get_engine(name: str, *, speed: float = 6.0, direction: int = 1,
+               colors=None):
     cls = _ENGINES.get(name)
     if cls is None:
         raise KeyError(f"no software engine named {name!r}")
-    if cls in (RainbowWave, Radar):
+    if cls is RainbowBands:
+        return cls(colors=colors, direction=direction, speed=speed)
+    if cls is Radar:
         return cls(direction=direction, speed=speed)
     if cls is RainbowBreathPulse:
         return cls(speed=speed, hue0=210.0)
@@ -291,7 +340,7 @@ def get_engine(name: str, *, speed: float = 6.0, direction: int = 1):
 
 
 def run(engine_name: str, kb: MysticKeyboard, *, speed: float = 6.0,
-        direction: int = 1, fps: int = 20) -> None:
+        direction: int = 1, fps: int = 12) -> None:
     """Block forever painting frames. Exits cleanly on SIGTERM/SIGINT.
 
     Robust against device hiccups: transient write failures never kill the
@@ -314,12 +363,12 @@ def run(engine_name: str, kb: MysticKeyboard, *, speed: float = 6.0,
         t = time.monotonic() - t0
         try:
             colors = eng.colors(t)
-            # one single-zone packet per zone per frame: the firmware only
-            # reliably refreshes single-zone effect packets, and the per-zone
-            # speed byte (ignored visually by steady mode) keeps packet
-            # identity unique even when two zones share a color
-            for z in range(NUM_ZONES):
-                kb.steady(colors[z], zones=[z], speed=600 + z)
+            # one frame = one steady_zones call: because every engine emits 24
+            # distinct colors, grouping by colour yields exactly one packet
+            # per zone — the validated packet shape (single-zone masks at
+            # speed 600, 12 fps). Grouped/shared masks and per-packet speed
+            # tweaks were tried before and stall the MCU.
+            kb.steady_zones({z: colors[z] for z in range(NUM_ZONES)})
             consecutive_fail = 0
         except Exception:
             consecutive_fail += 1
@@ -343,7 +392,7 @@ if __name__ == "__main__":
     ap.add_argument("engine", choices=sorted(set(_SOFTWARE_EFFECTS)))
     ap.add_argument("--speed", type=float, default=6.0)
     ap.add_argument("--dir", type=int, default=1)
-    ap.add_argument("--fps", type=int, default=20)
+    ap.add_argument("--fps", type=int, default=12)
     a = ap.parse_args()
     kb = MysticKeyboard()
     try:

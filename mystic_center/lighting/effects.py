@@ -18,6 +18,7 @@ natanalt + MS-1603 MSI Center captures documented in the MSI-KeyLight repo):
 from __future__ import annotations
 
 import colorsys
+import random
 from dataclasses import dataclass
 
 
@@ -100,12 +101,59 @@ def cycle_rainbow(
     return 3, kfs
 
 
-def wave(sat: float = 1.0, light: float = 0.55) -> tuple[int, list[Keyframe]]:
-    """Hardware color wave — same keyframes as cycle, animation type 4.
+# --- Rainbow (firmware band conveyor) ----------------------------------------------------
+#
+# A stream of at most 5 randomly picked band colours marches across the deck.
+# The deck shows four of them at a time — one per zone-column (the 24 zones
+# are row-major, so the travel axis is z % 4 and all six rows of a column
+# share one colour) — and a new band enters at the trailing edge exactly when
+# the leading band exits. Firmware-driven: one colour cycle (animation
+# type 3) per zone, every column's table starting one band slot further
+# along the stream, so the pattern slides sideways one band step at a time.
 
-    The firmware is claimed to synchronize waves across zones; direction is
-    byte 9. If the sync looks wrong on this unit we can fall back to a
-    software-driven wave later.
-    """
-    _, kfs = cycle_rainbow(sat, light)
-    return 4, kfs
+BAND_COUNT = 5  # colours in the rotation; the deck displays four
+
+
+def random_band_colors(n: int = BAND_COUNT, min_sep: float = 40.0) -> list[str]:
+    """n vivid full-saturation colours whose hues are pairwise >= min_sep apart."""
+    hues: list[float] = []
+    while len(hues) < n:
+        h = random.uniform(0.0, 360.0)
+        if all(min((h - o) % 360.0, (o - h) % 360.0) >= min_sep for o in hues):
+            hues.append(h)
+    out: list[str] = []
+    for h in hues:
+        r, g, b = colorsys.hsv_to_rgb(h / 360.0, 1.0, 1.0)
+        out.append(rgb_to_hex(int(round(r * 255)), int(round(g * 255)),
+                              int(round(b * 255))))
+    return out
+
+
+def band_keyframes(colors, direction: int = 1,
+                   offset: int = 0) -> list[Keyframe]:
+    """Keyframes for one full lap of the rainbow band conveyor.
+
+    colors: the stream in order (2..5 hex strings or RGB tuples, each band
+    one zone-column wide). direction 1 = the stream travels left→right, so a
+    fixed column runs *backwards* through the stream (earlier bands arrive).
+    offset shifts the starting slot — one band (100/n %) per zone-column,
+    which is what makes the pattern slide.
+
+    Shape (fits the MCU's 10-keyframe limit exactly): each of the first n−1
+    bands holds solid then blends ~1/5 of its slot into the next; the final
+    band starts at its slot and blends across into keyframe 0 as the cycle
+    wraps (last keyframe = 100 at the stream's first colour, the seamless-
+    loop convention)."""
+    palette = [hex_to_rgb(c) if isinstance(c, str) else tuple(c[:3])
+               for c in colors]
+    n = max(2, len(palette))
+    rotate = -1 if direction == 1 else 1
+    seg = 100 // n                    # percent of the cycle per band
+    fade = max(1, min(seg // 5, seg - 2))  # blend zone between bands
+    slot = [(offset + rotate * k) % n for k in range(n)]
+    kfs = [Keyframe(0, *palette[slot[0]])]
+    for k in range(n - 1):
+        kfs.append(Keyframe(k * seg + seg - fade, *palette[slot[k]]))
+        kfs.append(Keyframe((k + 1) * seg, *palette[slot[k + 1]]))
+    kfs.append(Keyframe(100, *palette[slot[0]]))
+    return kfs

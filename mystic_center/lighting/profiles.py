@@ -28,24 +28,30 @@ GAMING_BASE = "#26262B"
 class LightingState:
     """Everything needed to reproduce the current lighting."""
 
-    effect: str = "steady"  # off | steady | breath | cycle | wave
+    effect: str = "steady"  # off | steady | breath | cycle | rainbow
     zone_colors: dict[str, str] = field(default_factory=dict)  # zone index (str) -> hex
     color: str = "#FF7F00"  # main accent color
-    speed: float = 6.0  # seconds per animation cycle (3..12)
+    speed: float = 6.0  # seconds (effect-specific period)per animation cycle (3..12)
     direction: int = 1  # 1 = left->right, 0 = right->left
     level: int = 50  # byte7, MSI Center default 50
+    band_colors: list[str] = field(default_factory=list)  # rainbow band stream
 
     def validate(self) -> None:
-        if self.effect not in {"off", "steady", "breath", "cycle", "wave",
-                               "swave", "scycle", "spulse", "rbreath",
-                               "rain", "fire", "radar", "lightning",
-                               "gaming"}:
+        if self.effect not in {"off", "steady", "breath", "cycle", "rainbow",
+                               "scycle", "spulse", "rbreath", "rain", "fire",
+                               "radar", "lightning", "gaming"}:
             raise ValueError(f"bad effect: {self.effect}")
         if self.direction not in (0, 1):
             raise ValueError("direction must be 0 or 1")
         self.speed = min(12.0, max(3.0, float(self.speed)))
         self.level = min(100, max(0, int(self.level)))
         effects.hex_to_rgb(self.color)
+        if self.effect == "rainbow":
+            if len(self.band_colors) > effects.BAND_COUNT:
+                raise ValueError("rainbow keeps at most "
+                                 f"{effects.BAND_COUNT} band colours")
+            for c in self.band_colors:
+                effects.hex_to_rgb(c)
 
     # ---- apply ------------------------------------------------------------------
 
@@ -55,15 +61,23 @@ class LightingState:
         zones = zone_target  # None = all
 
         # software engines (animation type written per frame over HID).
-        # "wave" is software now: MSI-style column sweep, since the firmware
-        # wave is coarse. Legacy swave/scycle/spulse keep their old meaning.
-        if self.effect in ("swave", "scycle", "spulse", "rbreath", "rain",
-                           "fire", "radar", "lightning", "wave"):
+        if self.effect in ("scycle", "spulse", "rbreath", "rain",
+                           "fire", "radar", "lightning"):
             from .animate import is_software
             from .daemon import start_detached, stop
             assert is_software(self.effect)
             stop()
             start_detached(self.effect, self.speed, self.direction)
+            return
+
+        if self.effect == "rainbow":
+            # Firmware rainbow conveyor: one burst of per-zone colour cycles
+            # phase-offset by band slot; the MCU animates it itself, nothing
+            # on the host. Re-apply keeps the saved band colours.
+            if not (2 <= len(self.band_colors) <= effects.BAND_COUNT):
+                self.band_colors = effects.random_band_colors()
+            kb.rainbow(self.band_colors, speed=int(round(self.speed * 100)),
+                       direction=self.direction)
             return
 
         if self.effect == "gaming":
@@ -113,10 +127,17 @@ def _write_json(path: str, data: Any) -> None:
     os.replace(tmp, path)
 
 
+# Effects that existed before the rainbow conveyor; old saved states and
+# profiles load as rainbow.
+_LEGACY_EFFECT = {"wave": "rainbow", "swave": "rainbow",
+                  "rainbow-wave": "rainbow"}
+
+
 def load_state() -> LightingState:
     data = _read_json(STATE_PATH, None)
     try:
         st = LightingState(**data)
+        st.effect = _LEGACY_EFFECT.get(st.effect, st.effect)
         st.validate()
         return st
     except (TypeError, ValueError):
@@ -154,6 +175,7 @@ def get_profile(name: str) -> LightingState | None:
         return None
     try:
         st = LightingState(**profiles[name])
+        st.effect = _LEGACY_EFFECT.get(st.effect, st.effect)
         st.validate()
         return st
     except (TypeError, ValueError):

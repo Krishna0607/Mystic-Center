@@ -171,9 +171,25 @@ class MysticKeyboard:
         anim, kfs = effects.cycle_rainbow()
         self.apply_effect(anim, kfs, zones=zones, speed=speed)
 
-    def wave(self, zones=None, speed: int = 600, direction: int | None = None) -> None:
-        anim, kfs = effects.wave()
-        self.apply_effect(anim, kfs, zones=zones, speed=speed, direction=direction)
+    def rainbow(self, colors, speed: int = 500, direction: int | None = None,
+                zones=None) -> None:
+        """Rainbow band conveyor, run entirely by the keyboard firmware.
+
+        `colors` is the stream in order (up to 5 colours); the deck shows
+        four of them at a time — one clean colour per zone-column, all six
+        rows of a column matching — and the stream slides sideways:
+        direction 1 = left→right. A colour only enters at the trailing edge
+        when the leading colour has fully exited. Every zone gets its own
+        colour cycle (animation type 3) whose band table starts one band
+        slot further per column. `speed` = the packet byte: full 5-band lap
+        in seconds × 100. One burst of packets — nothing keeps running on
+        the host afterwards."""
+        d = self.direction if direction is None else direction
+        targets = list(range(NUM_ZONES)) if zones is None else list(zones)
+        for z in targets:
+            kfs = effects.band_keyframes(colors, d, offset=z % 4)
+            self.apply_effect(ANIM_CYCLE, kfs, zones=[z], speed=speed,
+                              direction=d)
 
     # --- legacy direct-output path (per-zone writes, no mask/select race) --------
 

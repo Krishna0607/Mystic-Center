@@ -6,8 +6,8 @@ Examples:
   mystic-control steady FF7000            # all zones steady orange
   mystic-control zone 3 FF0055            # paint zone 3
   mystic-control zones "FF0000 0022FF 00CC22 ..."   # all 24 zones, in order
-  mystic-control rainbow                  # cycle effect
-  mystic-control wave --dir 0             # hardware wave right→left
+  mystic-control cycle                     # whole-board color cycle
+  mystic-control rainbow --dir 0           # band conveyor right→left
   mystic-control breath FF2040
   mystic-control sweep                    # light zones one-by-one (mapping check)
   mystic-control profile save "My Look"
@@ -24,6 +24,7 @@ import sys
 import time
 
 from . import profiles as prof
+from . import effects
 from .effects import hex_to_rgb, rgb_to_hex, gradient, hsl_hex
 from .hid import DeviceNotFound, find_hidraw
 from .keyboard import NUM_ZONES, MysticKeyboard
@@ -91,8 +92,11 @@ def main(argv=None) -> int:
     sp.add_argument("--out", action="store_true", help="use direct per-zone output report")
     sp = add("zones", "24 colors: space or comma separated hex list")
     sp.add_argument("colors")
-    sp = add("rainbow", "rainbow color cycle").add_argument("--speed", type=float, default=6.0)
-    sp = add("wave", "hardware color wave").add_argument("--dir", type=int, default=1)
+    sp = add("cycle", "whole-board color cycle").add_argument("--speed", type=float, default=6.0)
+    sp = add("rainbow", "rainbow band conveyor (up to 5 random colours marching)")
+    sp.add_argument("--speed", type=float, default=6.0,
+                    help="seconds per full 5-band lap (3..12)")
+    sp.add_argument("--dir", type=int, default=1)
     sp = add("breath", "breathing color").add_argument("color")
     sp = add("off", "turn lighting off").add_argument("-z", "--zones", default=None)
     sp = add("level", "level byte 0..100 (MSI Center constant is 50)")
@@ -103,9 +107,8 @@ def main(argv=None) -> int:
     add("test-out", "cycle each zone via output reports (out-path test)")
     add("test-zones", "zone order testboard: 24 rainbow colors at once")
     sp = add("daemon", "run a software animation in the foreground (debug)")
-    sp.add_argument("engine", choices=["wave", "swave", "scycle", "spulse",
-                                       "rbreath", "rain", "fire", "radar",
-                                       "lightning"])
+    sp.add_argument("engine", choices=["scycle", "spulse", "rbreath", "rain",
+                                       "fire", "radar", "lightning"])
     sp.add_argument("--speed", type=float, default=6.0)
     sp.add_argument("--dir", type=int, default=1)
     sp.add_argument("--fps", type=int, default=12)
@@ -199,7 +202,7 @@ def main(argv=None) -> int:
         prof.save_state(state)
         return 0
 
-    if args.cmd == "rainbow":
+    if args.cmd == "cycle":
         kb.cycle(speed=int(round(args.speed * 100)))
         state = prof.load_state()
         state.effect = "cycle"
@@ -207,11 +210,15 @@ def main(argv=None) -> int:
         prof.save_state(state)
         return 0
 
-    if args.cmd == "wave":
-        kb.wave(speed=600, direction=args.dir)
+    if args.cmd == "rainbow":
+        speed = min(12.0, max(3.0, args.speed))
+        bands = effects.random_band_colors()
+        kb.rainbow(bands, speed=int(round(speed * 100)), direction=args.dir)
         state = prof.load_state()
-        state.effect = "wave"
+        state.effect = "rainbow"
+        state.speed = speed
         state.direction = args.dir
+        state.band_colors = bands
         prof.save_state(state)
         return 0
 
@@ -253,11 +260,11 @@ def main(argv=None) -> int:
         kb.cycle()
         print("rainbow cycle — 3s")
         time.sleep(3)
-        kb.wave(direction=1)
-        print("hardware wave L→R — 3s")
+        kb.rainbow(effects.random_band_colors())
+        print("rainbow conveyor L→R — 3s")
         time.sleep(3)
-        kb.wave(direction=0)
-        print("hardware wave R→L — 3s")
+        kb.rainbow(effects.random_band_colors(), direction=0)
+        print("rainbow conveyor R→L — 3s")
         time.sleep(3)
         kb.off()
         return 0

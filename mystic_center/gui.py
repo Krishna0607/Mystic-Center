@@ -21,9 +21,11 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
 from . import client as daemon_client
 from .lighting import profiles as prof
+from .lighting import effects
 from .lighting.effects import gradient, hex_to_rgb, rgb_to_hex
 from .lighting.hid import DeviceNotFound, find_hidraw
 from .lighting.keyboard import NUM_ZONES, MysticKeyboard
+from .lighting.keyboard_view import KeyboardView
 
 APP_ID = "org.mysticcenter.Center"
 APP_NAME = "Mystic Center"
@@ -47,8 +49,6 @@ BASE_CSS = """.zone-btn { min-width: 46px; min-height: 34px; font-size: 9px;
     color: rgba(255,255,255,0.0); }
 .mode-btn { min-width: 92px; }
 """
-
-ZONE_CSS_TEMPLATE = ".zb{idx} {{ background-color: rgb({r},{g},{b}); }}"
 
 AUTOSTART_DESKTOP = """[Desktop Entry]
 Type=Application
@@ -614,37 +614,18 @@ class BatteryPage(Page):
 ICON_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "lighting", "icons")
 
-# Physical-key grouping per zone: 4 zone-columns x 6 zone-rows on the
-# Crosshair 16 HX deck (approximate quarter boundaries; the numpad maps into
-# the right-most column, row-major zone ordering hardware-verified). Key
-# labels follow the official deck art: bottom-left is CTRL / WIN / ALT only
-# (the single Fn key lives bottom-right, after the right CTRL, before the
-# arrows); numpad top row is + − NUM LOCK with ✻ / relocated to the F-row.
-# Legend format: "main^tiny" renders tiny-above (shift legends), "main#tiny"
-# renders tiny-below (numpad nav legends).
-KB_ROWS: list[list[list[str]]] = [
-    [["ESC", "F1", "F2", "F3", "F4"], ["F5", "F6", "F7", "F8"],
-     ["F9", "F10", "F11", "F12"], ["PRT SCR", "INS", "DEL", "✻", "/", "⏻"]],
-    [["`^~", "1^!", "2^@", "3^#", "4^$"], ["5^%", "6^^", "7^&", "8^*"],
-     ["9^(", "0^)", "-^_", "=^+", "←^BACKSPACE"], ["+", "−", "NUM\nLOCK"]],
-    [["TAB^⇥", "Q", "W", "E", "R"], ["T", "Y", "U", "I"],
-     ["O", "P", "[^{", "]^}", "\\^|"], ["7#HOME", "8#↑", "9#PGUP"]],
-    [["CAPS LOCK", "A", "S", "D", "F"], ["G", "H", "J", "K"],
-     ["L", ";^:", "'^\""], ["⏎ ENTER", "4#←", "5", "6#→"]],
-    [["⇧ SHIFT", "Z", "X", "C", "V"], ["B", "N", "M", ",^<"],
-     [".^>", "/^?", "⇧ SHIFT"], ["↑", "1#END", "2#↓", "3#PGDN"]],
-    [["CTRL", "⊞", "ALT"], ["SPACE", "ALT GR", "\\^|"],
-     ["CTRL", "FN", "←"], ["↓", "→", "0#INS", ".#DEL", "⏎#ENTER"]],
-]
+# The physical keyboard reference (photo-matched deck geometry, 6 rows ×
+# 4 zone-columns) lives in lighting/layout.py and is drawn by
+# lighting/keyboard_view.py as one Cairo view with clickable zones.
 
-EFFECT_ORDER = ["steady", "breath", "rbreath", "cycle", "wave", "rain",
+EFFECT_ORDER = ["steady", "breath", "rbreath", "cycle", "rainbow", "rain",
                 "fire", "radar", "lightning", "gaming", "off"]
 EFFECT_NAMES = {
     "steady": "Steady",
     "breath": "Breathing",
     "rbreath": "Rainbow Breath",
     "cycle": "Colorful Cycle",
-    "wave": "Wave",
+    "rainbow": "Rainbow",
     "rain": "Rain",
     "fire": "Fire",
     "radar": "Radar",
@@ -659,7 +640,7 @@ TUNING = {
     "breath": ("color", "speed", "level"),
     "rbreath": ("speed",),
     "cycle": ("speed", "level"),
-    "wave": ("speed", "direction"),
+    "rainbow": ("speed", "direction"),
     "rain": ("speed",),
     "fire": ("speed",),
     "radar": ("speed", "direction"),
@@ -673,116 +654,25 @@ SPEED_TITLES = {
     "breath": "Cycle length (seconds)",
     "rbreath": "Cycle length (seconds)",
     "cycle": "Cycle length (seconds)",
-    "wave": "Hue drift period (seconds)",
+    "rainbow": "Rainbow lap (seconds)",
     "rain": "Activity (6 = natural)",
     "fire": "Flicker speed (6 = natural)",
     "radar": "Sweep period (seconds)",
     "lightning": "Storm power (6 = natural)",
 }
 
-# effects rendered by the software 24-zone daemon (animate.py engines)
-SOFTWARE = {"wave", "swave", "scycle", "spulse", "rbreath", "rain",
-            "fire", "radar", "lightning"}
+# effects rendered by the software 24-zone daemon (animate.py engines).
+# "rainbow" is NOT here: it is firmware-driven (one burst of per-zone
+# colour cycles; the MCU animates it itself, no daemon).
+SOFTWARE = {"scycle", "spulse", "rbreath", "rain", "fire", "radar",
+            "lightning"}
 
-LIGHT_KEY_CSS = \
-    ".light-key { font-family: \"Open Sans Condensed\", \"DejaVu Sans Condensed\", sans-serif;\n" \
-    "  font-stretch: condensed; font-size: 9px; font-weight: 700; letter-spacing: 0.5px;\n" \
-    "  padding: 0; border-radius: 5px; border: 1px solid rgba(0,0,0,0.45);\n" \
-    "  box-shadow: inset 0 -7px 9px -5px rgba(0,0,0,0.4); }\n" \
-    ".light-key.wasd-w { border: 2px solid #6f6fff;\n" \
-    "  box-shadow: inset 0 0 9px rgba(111,111,255,0.65), 0 0 6px rgba(111,111,255,0.4); }\n" \
-    ".light-key.wasd-a { border: 2px solid #a266ff;\n" \
-    "  box-shadow: inset 0 0 9px rgba(162,102,255,0.65), 0 0 6px rgba(162,102,255,0.4); }\n" \
-    ".light-key.wasd-s { border: 2px solid #ff4d5e;\n" \
-    "  box-shadow: inset 0 0 9px rgba(255,77,94,0.6), 0 0 6px rgba(255,77,94,0.35); }\n" \
-    ".light-key.wasd-d { border: 2px solid #ff6a3c;\n" \
-    "  box-shadow: inset 0 0 9px rgba(255,106,60,0.6), 0 0 6px rgba(255,106,60,0.35); }\n" \
-    ".light-key.sel { border: 2px solid #9cc7ff; box-shadow: 0 0 8px 1px rgba(120,180,255,0.55); }\n" \
+PAGE_CSS = \
     ".kb-card { background: rgba(127,127,127,0.08); border-radius: 14px;\n" \
     "  border: 1px solid rgba(127,127,127,0.16); }\n" \
     ".effect-tile { border-radius: 12px; padding-left: 10px; padding-right: 10px; }\n" \
     ".effect-tile.active { border: 2px solid #3584e4;\n" \
     "  background: rgba(53,132,228,0.14); }"
-
-
-# Physical-keycap widths in standard key units (1 u ≈ 19 mm); default 1 u.
-# Keyed by the exact KB_ROWS entry (keeps two-legend keys distinct).
-KEY_UNIT = 46  # px per unit — physical scale of the real deck
-KEY_WIDTHS: dict[str, float] = {
-    "ESC": 1.25, "PRT SCR": 1.5, "INS": 1.25, "DEL": 1.25, "✻": 1.25,
-    "/": 1.25, "⏻": 1.25, "TAB^⇥": 1.5, "←^BACKSPACE": 2.0,
-    "CAPS LOCK": 1.75, "⏎ ENTER": 2.0, "⇧ SHIFT": 2.25, "CTRL": 1.5,
-    "FN": 1.25, "ALT": 1.25, "ALT GR": 1.25, "⊞": 1.25, "SPACE": 6.25,
-    "+": 1.25, "−": 1.25, "NUM\nLOCK": 1.4, "⏎#ENTER": 1.5,
-}
-
-# hero accent rings for WASD (colors per the deck art)
-WASD_CLASS = {"W": "wasd-w", "A": "wasd-a", "S": "wasd-s", "D": "wasd-d"}
-
-
-def _key_width(entry: str) -> float:
-    if entry in KEY_WIDTHS:
-        return KEY_WIDTHS[entry]
-    main = entry.split("^", 1)[0].split("#", 1)[0]
-    return KEY_WIDTHS.get(main, 1.0)
-
-
-def _key_markup(entry: str) -> str | None:
-    """Two-line keycap legends: 'main^tiny' = tiny above, 'main#tiny' = below."""
-    from xml.sax.saxutils import escape
-    if "^" in entry:
-        main, tiny = entry.split("^", 1)
-        return f'<span size="small">{escape(tiny)}</span>\n{escape(main)}'
-    if "#" in entry:
-        main, tiny = entry.split("#", 1)
-        return f'{escape(main)}\n<span size="small">{escape(tiny)}</span>'
-    return None
-
-
-class KeyboardLayout(Gtk.Box):
-    """24-zone reference drawn as a physical keyboard at real-keycap scale;
-    keys are clickable zone selectors and preview colors live in the .zbN
-    css rules."""
-
-    def __init__(self, page: "LightingPage"):
-        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        self.page = page
-        self.key_buttons: dict[int, list[Gtk.Button]] = {}
-        for row_idx, row_zones in enumerate(KB_ROWS):
-            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-            row.set_halign(Gtk.Align.CENTER)
-            for col_idx, keys in enumerate(row_zones):
-                zone = row_idx * 4 + col_idx
-                box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=3)
-                for key in keys:
-                    btn = Gtk.Button()
-                    btn.add_css_class("light-key")
-                    btn.add_css_class(f"zb{zone}")
-                    if key in WASD_CLASS:
-                        btn.add_css_class(WASD_CLASS[key])
-                    mk = _key_markup(key)
-                    if mk is not None:
-                        lbl = Gtk.Label()
-                        lbl.set_markup(mk)
-                        lbl.set_justify(Gtk.Justification.CENTER)
-                        btn.set_child(lbl)
-                    else:
-                        btn.set_label(key)
-                    w = KEY_UNIT * _key_width(key)
-                    btn.set_size_request(int(w), 38)
-                    btn.set_tooltip_text(f"Zone {zone}")
-                    btn.connect("clicked", page.on_zone_clicked, zone)
-                    self.key_buttons.setdefault(zone, []).append(btn)
-                    box.append(btn)
-                row.append(box)
-            self.append(row)
-
-    def set_zone_selected(self, zone: int, selected: bool) -> None:
-        for btn in self.key_buttons.get(zone, []):
-            if selected:
-                btn.add_css_class("sel")
-            else:
-                btn.remove_css_class("sel")
 
 
 class EffectTile(Gtk.Button):
@@ -819,8 +709,6 @@ class LightingPage(Page):
         self._sweep_i = -1
         self._sweep_backup: list[str] | None = None
         self.state = prof.load_state()
-        if self.state.effect == "swave":  # legacy name → MSI-style wave
-            self.state.effect = "wave"
         if self.state.effect not in EFFECT_ORDER:
             self.state.effect = "steady"
 
@@ -858,14 +746,14 @@ class LightingPage(Page):
 
         card = Adw.Bin()
         card.add_css_class("kb-card")
-        self.kb_layout = KeyboardLayout(self)
+        self.kbview = KeyboardView(on_zone_clicked=self.on_zone_clicked)
         kb_scroll = Gtk.ScrolledWindow()
         kb_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
         kb_scroll.set_margin_top(10)
         kb_scroll.set_margin_bottom(10)
         kb_scroll.set_margin_start(10)
         kb_scroll.set_margin_end(10)
-        kb_scroll.set_child(self.kb_layout)
+        kb_scroll.set_child(self.kbview)
         card.set_child(kb_scroll)
         upper_box.append(card)
 
@@ -958,7 +846,7 @@ class LightingPage(Page):
         self.speed_row.set_value(self.state.speed)
         self.tuning_group.add(self.speed_row)
 
-        self.dir_row = Adw.SwitchRow(title="Wave direction: left → right",
+        self.dir_row = Adw.SwitchRow(title="Direction: left → right",
                                      subtitle="Off = right → left")
         self.dir_row.set_active(self.state.direction == 1)
         self.tuning_group.add(self.dir_row)
@@ -1047,16 +935,15 @@ class LightingPage(Page):
             )
 
     def style_full(self) -> None:
-        css = [BASE_CSS, LIGHT_KEY_CSS]
+        css = [BASE_CSS, PAGE_CSS]
         for row in SWATCH_ROWS:
             for _, hx in row:
                 r, g, b = hex_to_rgb(hx)
                 css.append(
                     f".swatch-{hx.lower()} {{ background-color: rgb({r},{g},{b}); }}")
-        for i in range(NUM_ZONES):
-            r, g, b = hex_to_rgb(self.preview_colors[i])
-            css.append(ZONE_CSS_TEMPLATE.format(idx=i, r=r, g=g, b=b))
         self.provider.load_from_string("\n".join(css))
+        if getattr(self, "kbview", None) is not None:
+            self.kbview.set_colors(self.preview_colors)
 
     def _sync_effect_ui(self) -> None:
         """Selected-tile ring, dynamic titles, and relevant tuning rows."""
@@ -1128,7 +1015,8 @@ class LightingPage(Page):
         sw_eff = {"cycle": "scycle"}.get(eff, eff)  # hw cycle → same look
         try:
             eng = animate.get_engine(sw_eff, speed=st.speed,
-                                     direction=st.direction)
+                                     direction=st.direction,
+                                     colors=getattr(st, "band_colors", None))
         except KeyError:
             # legacy/unknown effect name — fall back to the steady preview
             return [st.zone_colors.get(str(z), st.color).lstrip("#")
@@ -1143,18 +1031,17 @@ class LightingPage(Page):
 
     def sync_preview_from_state(self) -> None:
         self.preview_colors = self._sample_preview_colors()
-        for zone in range(NUM_ZONES):
-            self.kb_layout.set_zone_selected(zone, zone in self.selected)
+        self.kbview.set_selected(self.selected)
         self.style_full()
 
     # -------------------------------------------------------------------- events
 
-    def on_zone_clicked(self, _btn: Gtk.Button, zone: int) -> None:
+    def on_zone_clicked(self, zone: int) -> None:
         if zone in self.selected:
             self.selected.discard(zone)
         else:
             self.selected.add(zone)
-        self.kb_layout.set_zone_selected(zone, zone in self.selected)
+        self.kbview.set_zone_selected(zone, zone in self.selected)
 
     def on_effect_tile(self, tile: EffectTile) -> None:
         self.state.effect = tile.effect_key
@@ -1162,13 +1049,11 @@ class LightingPage(Page):
 
     def on_select_all(self, *_a) -> None:
         self.selected = set(range(NUM_ZONES))
-        for z in range(NUM_ZONES):
-            self.kb_layout.set_zone_selected(z, True)
+        self.kbview.set_selected(self.selected)
 
     def on_clear_selection(self, *_a) -> None:
         self.selected.clear()
-        for z in range(NUM_ZONES):
-            self.kb_layout.set_zone_selected(z, False)
+        self.kbview.set_selected(set())
 
     def on_swatch(self, _btn, hexstr: str) -> None:
         self.color_btn.set_rgba(self._rgba(hexstr))
@@ -1193,6 +1078,39 @@ class LightingPage(Page):
         self._collect_state()
         state = self.state
         from .lighting import daemon as daemon_ctl
+
+        if state.effect == "rainbow":
+            # Firmware rainbow conveyor: one burst of per-zone colour cycles,
+            # phase-offset by band slot. Up to 5 random colours march across
+            # the deck, one per zone-column; a colour only enters when the
+            # leading colour has fully exited. Fresh randomness every Apply.
+            kb = self._current_machine()
+            if kb is None:
+                return
+            daemon_ctl.stop()
+            self._stop_preview_timer()
+            try:
+                state.band_colors = effects.random_band_colors()
+                kb.rainbow(state.band_colors,
+                           speed=int(round(state.speed * 100)),
+                           direction=state.direction)
+            except Exception as e:
+                self.window.toast(f"apply failed: {e}")
+                return
+            prof.save_state(state)
+            self._preview_engine = None
+            try:
+                from .lighting.animate import get_engine
+                self._preview_engine = get_engine(
+                    "rainbow", speed=state.speed, direction=state.direction,
+                    colors=state.band_colors)
+            except KeyError:
+                pass
+            self._preview_t0 = GLib.get_monotonic_time() / 1e6
+            self._start_preview_timer()
+            self.sync_preview_from_state()
+            self.window.toast("applied — Rainbow (runs on the keyboard itself)")
+            return
 
         if state.effect in SOFTWARE:
             daemon_ctl.stop()
@@ -1344,9 +1262,6 @@ class LightingPage(Page):
         if st is None:
             self.window.toast(f"profile '{name}' is broken — delete it")
             return
-        if st.effect == "swave":  # legacy name → MSI-style wave
-            st.effect = "wave"
-
         if st.effect in SOFTWARE:
             st.apply_to(None)  # daemon path — the child opens the device itself
             self._stop_preview_timer()
