@@ -63,16 +63,16 @@ class RainbowWave:
         self.light = light
 
     def colors(self, t: float) -> list[str]:
-        # hue axis = COLUMNS (left→right): strong 90° step per column band,
-        # tiny 8° row smear so packets stay single-zone but the pattern
-        # unmistakably reads as a rainbow sliding left→right
+        # 4 visible bands, ONE color per zone-column (true 4-zone look).
+        # Every zone still ends up a *distinct packet color* — hexc_unique
+        # carries the change in the invisible low bits (<=3% of a channel) —
+        # so the firmware keeps animating frames while the eye sees exactly
+        # four clean rainbow bands flowing left→right.
         shift = 360.0 * self.direction * (t / self.period)
         out = []
         for z in range(NUM_ZONES):
             col = z % N_COLS
-            row = z // N_COLS
-            out.append(hexc_unique(col * 90.0 + row * 8.0 + shift,
-                                   1.0, self.light, z))
+            out.append(hexc_unique(col * 90.0 + shift, 1.0, self.light, z))
         return out
 
 
