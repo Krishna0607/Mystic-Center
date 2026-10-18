@@ -616,20 +616,23 @@ ICON_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 # Physical-key grouping per zone: 4 zone-columns x 6 zone-rows on the
 # Crosshair 16 HX deck (approximate quarter boundaries; the numpad maps into
-# the right-most column, row-major zone ordering hardware-verified).
+# the right-most column, row-major zone ordering hardware-verified). Key
+# labels, order and widths follow the official deck art ("Strike with
+# precision" render): uppercase caps, PRT SCR/INS/DEL/✕/⏻ top-right,
+# arrows cluster left of the numpad, WASD accented.
 KB_ROWS: list[list[list[str]]] = [
-    [["Esc", "F1", "F2", "F3"], ["F4", "F5", "F6", "F7"],
-     ["F8", "F9", "F10", "F11"], ["F12", "Del", "PgUp", "PgDn"]],
+    [["ESC", "F1", "F2", "F3", "F4"], ["F5", "F6", "F7", "F8"],
+     ["F9", "F10", "F11", "F12"], ["PRT SCR", "INS", "DEL", "✕", "⏻"]],
     [["`", "1", "2", "3", "4"], ["5", "6", "7", "8"],
-     ["9", "0", "-", "="], ["Bksp", "Nlk", "/", "*"]],
-    [["Tab", "Q", "W", "E", "R"], ["T", "Y", "U", "I"],
-     ["O", "P", "[", "]"], ["\\", "7", "8", "-"]],
-    [["Caps", "A", "S", "D", "F"], ["G", "H", "J", "K"],
-     ["L", ";", "'"], ["⏎", "4", "5", "6"]],
-    [["⇧", "Z", "X", "C", "V"], ["B", "N", "M", ","],
-     [".", "/", "⇧"], ["1", "2", "3", "+"]],
-    [["Ctrl", "Fn", "⊞", "Alt"], ["Space", "Alt"],
-     ["Ctrl", "←"], ["↓", "→", "0", "."]],
+     ["9", "0", "-", "=", "BKSP"], ["NUM LK", "/", "*", "−"]],
+    [["TAB", "Q", "W", "E", "R"], ["T", "Y", "U", "I"],
+     ["O", "P", "{", "}", "\\"], ["7", "8", "9", "+"]],
+    [["CAPS", "A", "S", "D", "F"], ["G", "H", "J", "K"],
+     ["L", ";", "'"], ["ENTER", "4", "5", "6"]],
+    [["SHIFT", "Z", "X", "C", "V"], ["B", "N", "M", ","],
+     [".", "/", "SHIFT"], ["↑", "1", "2", "3"]],
+    [["CTRL", "FN", "⊞", "ALT"], ["SPACE", "ALT GR", "\\"],
+     ["CTRL", "FN", "←", "↓", "→"], ["0", ".", "⏎"]],
 ]
 
 EFFECT_ORDER = ["steady", "breath", "rbreath", "cycle", "wave", "rain",
@@ -679,8 +682,13 @@ SPEED_TITLES = {
 SOFTWARE = {"wave", "swave", "scycle", "spulse", "rbreath", "rain",
             "fire", "radar", "lightning"}
 
-LIGHT_KEY_CSS = ".light-key { font-size: 10px; font-weight: 500; padding: 0; border-radius: 6px;\n" \
-    "  border: 1px solid rgba(0,0,0,0.45); box-shadow: inset 0 -7px 9px -5px rgba(0,0,0,0.4); }\n" \
+LIGHT_KEY_CSS = \
+    ".light-key { font-family: \"Open Sans Condensed\", \"DejaVu Sans Condensed\", sans-serif;\n" \
+    "  font-stretch: condensed; font-size: 9px; font-weight: 700; letter-spacing: 0.6px;\n" \
+    "  padding: 0; border-radius: 5px; border: 1px solid rgba(0,0,0,0.45);\n" \
+    "  box-shadow: inset 0 -7px 9px -5px rgba(0,0,0,0.4); }\n" \
+    ".light-key.wasd { border: 2px solid #a06bff; border-radius: 7px;\n" \
+    "  box-shadow: inset 0 -7px 9px -5px rgba(0,0,0,0.35), 0 0 8px rgba(160,107,255,0.55); }\n" \
     ".light-key.sel { border: 2px solid #9cc7ff; box-shadow: 0 0 8px 1px rgba(120,180,255,0.55); }\n" \
     ".kb-card { background: rgba(127,127,127,0.08); border-radius: 14px;\n" \
     "  border: 1px solid rgba(127,127,127,0.16); }\n" \
@@ -692,10 +700,10 @@ LIGHT_KEY_CSS = ".light-key { font-size: 10px; font-weight: 500; padding: 0; bor
 # Physical-keycap widths in standard key units (1 u ≈ 19 mm); default 1 u
 KEY_UNIT = 46  # px per unit — physical scale of the real deck
 KEY_WIDTHS: dict[str, float] = {
-    "Esc": 1.25, "Tab": 1.5, "Caps": 1.75, "Bksp": 2.0, "⏎": 2.0,
-    "⇧": 2.25, "Ctrl": 1.25, "Fn": 1.25, "Alt": 1.25, "⊞": 1.25,
-    "Space": 5.5, "Nlk": 1.25, "0": 2.0,
-    "Del": 1.25, "PgUp": 1.25, "PgDn": 1.25,
+    "ESC": 1.25, "TAB": 1.5, "CAPS": 1.75, "BKSP": 2.0, "ENTER": 2.0,
+    "SHIFT": 2.25, "CTRL": 1.25, "FN": 1.25, "ALT": 1.25, "⊞": 1.25,
+    "SPACE": 5.5, "NUM LK": 1.25, "PRT SCR": 1.25, "⏻": 1.25,
+    "ALT GR": 1.25, "⏎": 1.0,
 }
 
 
@@ -718,6 +726,8 @@ class KeyboardLayout(Gtk.Box):
                     btn = Gtk.Button(label=key)
                     btn.add_css_class("light-key")
                     btn.add_css_class(f"zb{zone}")
+                    if key in ("W", "A", "S", "D"):
+                        btn.add_css_class("wasd")
                     w = KEY_UNIT * KEY_WIDTHS.get(key, 1.0)
                     btn.set_size_request(int(w), 38)
                     btn.set_tooltip_text(f"Zone {zone}")
@@ -1075,7 +1085,14 @@ class LightingPage(Page):
             return base
         # software engine sample at a mid-animation instant
         from .lighting import animate
-        eng = animate.get_engine(eff, speed=st.speed, direction=st.direction)
+        sw_eff = {"cycle": "scycle"}.get(eff, eff)  # hw cycle → same look
+        try:
+            eng = animate.get_engine(sw_eff, speed=st.speed,
+                                     direction=st.direction)
+        except KeyError:
+            # legacy/unknown effect name — fall back to the steady preview
+            return [st.zone_colors.get(str(z), st.color).lstrip("#")
+                    for z in range(NUM_ZONES)]
         if isinstance(eng, (animate.Rain, animate.Lightning)):
             t = 0.0
             for _ in range(7):  # let the state build up a few events

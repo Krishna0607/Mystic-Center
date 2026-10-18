@@ -50,9 +50,13 @@ def hexc_unique(hue: float, sat: float, light: float, z: int) -> str:
 
 
 class RainbowWave:
-    """Wave: full rainbow across all 24 zones (row-major), sliding smoothly
-    over time. The original validated geometry. Hue span covers the MSI
-    palette: red → orange → yellow → green → cyan → blue → violet/magenta."""
+    """Wave: four clean rainbow bands flowing left→right across the deck.
+
+    Palette and column order follow the official MSI deck art: violet →
+    cyan-blue → yellow-green → orange-red from left to right (-95° per
+    zone-column, starting at 285° violet), phase drift travels the rainbow.
+    Each zone's packet color stays distinct via the invisible low-bit fold
+    (single-zone masks — the firmware refresh contract)."""
 
     name = "wave"
 
@@ -63,16 +67,17 @@ class RainbowWave:
         self.light = light
 
     def colors(self, t: float) -> list[str]:
-        # 4 visible bands, ONE color per zone-column (true 4-zone look).
-        # Every zone still ends up a *distinct packet color* — hexc_unique
-        # carries the change in the invisible low bits (<=3% of a channel) —
-        # so the firmware keeps animating frames while the eye sees exactly
-        # four clean rainbow bands flowing left→right.
+        # Palette and order follow the MSI "Strike with precision" deck art:
+        # violet → blue/cyan → yellow/green → orange/red from left to right
+        # (columns step by -95°: 285° violet, 190° cyan-blue, 95° yellow-green,
+        # 0° orange-red). Phase drift flows the rainbow across the deck; each
+        # zone's packet color stays unique via the invisible low-bit fold.
         shift = 360.0 * self.direction * (t / self.period)
         out = []
         for z in range(NUM_ZONES):
             col = z % N_COLS
-            out.append(hexc_unique(col * 90.0 + shift, 1.0, self.light, z))
+            out.append(hexc_unique(285.0 - 95.0 * col + shift, 1.0,
+                                   self.light, z))
         return out
 
 
