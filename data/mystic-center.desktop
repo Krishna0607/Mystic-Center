@@ -2,9 +2,10 @@
 Type=Application
 Name=Mystic Center
 Comment=MSI laptop control center: overview, performance, fans, battery, RGB
-Exec=mystic-center
+Exec=__APP_BIN__
 Icon=mystic-center
 Terminal=false
-Categories=System;Utility;
+Categories=Utility;
 Keywords=msi;mystic;fan;battery;rgb;lighting;
 StartupNotify=true
+StartupWMClass=org.mysticcenter.Center

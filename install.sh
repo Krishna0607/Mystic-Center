@@ -57,8 +57,13 @@ EOF
 chmod +x "${BIN_DIR}/mystic-center"
 
 cp "$SRC/data/mystic-center.desktop" "$DESKTOP_DIR/"
-cp "$SRC/data/mystic-center-icon.svg" "$ICON_DIR/" 2>/dev/null || true
+sed -i "s|Exec=__APP_BIN__|Exec=${BIN_DIR}/mystic-center|" "$DESKTOP_DIR/mystic-center.desktop"
+cp "$SRC/data/mystic-center-icon.svg" "$ICON_DIR/mystic-center.svg"
 update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
+gtk-update-icon-cache -q -t -f "$ICON_DIR/../hicolor" 2>/dev/null || true
+if command -v desktop-file-validate >/dev/null 2>&1; then
+    desktop-file-validate "$DESKTOP_DIR/mystic-center.desktop" && echo "    desktop entry: valid"
+fi
 
 echo "==> Installed."
 echo "    CLI:  mystic-center status"
