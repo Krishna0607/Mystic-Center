@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Mystic Center
+Comment=MSI laptop control center: overview, performance, fans, battery, RGB
+Exec=mystic-center
+Icon=mystic-center
+Terminal=false
+Categories=System;Utility;
+Keywords=msi;mystic;fan;battery;rgb;lighting;
+StartupNotify=true

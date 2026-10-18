@@ -1,0 +1,10 @@
+# MSI MysticLight laptop keyboards (MS-160x family).
+# Grants the active seat user direct access to the raw HID node — this is
+# what MSI Center-equivalent apps need to write RGB packets.
+#
+# Applies to hidraw nodes of the USB keyboard LED controllers:
+#   1462:1603 (MS-1603, Crosshair 16 HX D14VFKG — 24 zones)
+#   1462:1601 (MS-1565, Katana 15 — 4 zones)
+#   0DB0:1606 (MS-1606, Cyborg 15) etc.
+
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1462", ATTRS{idProduct}=="160[0-9a-f]", TAG+="uaccess"

@@ -1,0 +1,20 @@
+[Unit]
+Description=Mystic Center privileged backend (msi-ec + EC access)
+Documentation=file:///home/krishna/.local/share/mystic-center/docs/EC-MAP.md
+After=multi-user.target
+ConditionPathExists=/sys/devices/platform/msi-ec
+
+[Service]
+Type=simple
+User=root
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/home/krishna/.local/share/mystic-center
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 -m mystic_center.daemon_entry
+Restart=always
+RestartSec=2
+# crash-safety: Restart triggers a cold daemon that parks any leftover
+# custom fan duty at firmware auto (checked at daemon startup).
+
+[Install]
+WantedBy=multi-user.target
