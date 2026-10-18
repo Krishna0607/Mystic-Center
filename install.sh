@@ -42,11 +42,24 @@ echo "==> Checking runtime dependencies"
 python3 -c 'import gi; gi.require_version("Gtk","4.0"); gi.require_version("Adw","1")' 2>/dev/null \
     || { echo "GTK4/libadwaita via PyGObject required"; exit 1; }
 
+echo "==> Retiring the legacy mystic-control app (if present)"
+LEGACY_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/mystic-control"
+if [[ -d "$LEGACY_DIR" || -e "${BIN_DIR}/mystic-control" ]]; then
+    rm -rf "$LEGACY_DIR"
+    rm -f "${BIN_DIR}/mystic-control" \
+          "${XDG_DATA_HOME:-$HOME/.local/share}/applications/org.mysticcontrol.MysticControl.desktop" \
+          "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps/mystic-control.svg" \
+          "${HOME}/.config/autostart/mystic-control-apply.desktop"
+    echo "    removed legacy files (keyboard state in ~/.config/mystic-control kept)"
+else
+    echo "    nothing to remove"
+fi
+
 echo "==> Installing app files to ${APP_DIR}"
 mkdir -p "$APP_DIR" "$BIN_DIR" "$DESKTOP_DIR" "$ICON_DIR"
 rm -rf "${APP_DIR:?}/mystic_center" "${APP_DIR}/"?* 2>/dev/null || true
 cp -r "$SRC/mystic_center" "$SRC/data" "$SRC/tests" "$SRC/docs" "$SRC/tools" \
-    "$APP_DIR/"
+    "$SRC/systemd" "$APP_DIR/"
 cp "$SRC/launcher.py" "$SRC/install.sh" "$SRC/README.md" "$APP_DIR/" 2>/dev/null || true
 find "$APP_DIR" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
 

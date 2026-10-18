@@ -1,30 +1,30 @@
 #!/usr/bin/env python3
-"""mystic-control — command line companion.
+"""Lighting CLI — built into mystic-center (`mystic-center lighting ...`).
 
 Examples:
-  mystic-control list                     # locate the device + access state
-  mystic-control steady FF7000            # all zones steady orange
-  mystic-control zone 3 FF0055            # paint zone 3
-  mystic-control zones "FF0000 0022FF 00CC22 ..."   # all 24 zones, in order
-  mystic-control breath FF2040            # MSI breathing
-  mystic-control cycle --speed 6          # MSI color cycle (or slow|medium|fast)
-  mystic-control wave --rainbow --dir right --speed medium   # MSI Wave
-  mystic-control dance --speed fast       # MSI Dance
-  mystic-control wheel --colors FF0000,FFFF00,00FFFF --dir cw
-  mystic-control bouncy --colors 00FFFF   # MSI Bouncy Ball
-  mystic-control custom-set 0-7 steady --colors FF0000   # per-zone styles
-  mystic-control custom-apply             # push stored per-zone styles
-  mystic-control save                     # persist to the keyboard (MCU)
-  mystic-control revert                   # restore the MCU's saved lighting
-  mystic-control sync --color FF00AA      # all-sync solid colour
-  mystic-control sync --rainbow           # all-sync rainbow preset
-  mystic-control info                     # MCU firmware + language
-  mystic-control rainbow --dir 0          # band conveyor right→left
-  mystic-control sweep                    # light zones one-by-one (mapping check)
-  mystic-control profile save "My Look"
-  mystic-control profile list|apply NAME|delete NAME
-  mystic-control apply                    # re-apply saved state (login/autostart)
-  mystic-control test-effects | test-zones
+  mystic-center lighting list                     # locate the device + access state
+  mystic-center lighting steady FF7000            # all zones steady orange
+  mystic-center lighting zone 3 FF0055            # paint zone 3
+  mystic-center lighting zones "FF0000 0022FF 00CC22 ..."   # all 24 zones, in order
+  mystic-center lighting breath FF2040            # MSI breathing
+  mystic-center lighting cycle --speed 6          # MSI color cycle (or slow|medium|fast)
+  mystic-center lighting wave --rainbow --dir right --speed medium   # MSI Wave
+  mystic-center lighting dance --speed fast       # MSI Dance
+  mystic-center lighting wheel --colors FF0000,FFFF00,00FFFF --dir cw
+  mystic-center lighting bouncy --colors 00FFFF   # MSI Bouncy Ball
+  mystic-center lighting custom-set 0-7 steady --colors FF0000   # per-zone styles
+  mystic-center lighting custom-apply             # push stored per-zone styles
+  mystic-center lighting save                     # persist to the keyboard (MCU)
+  mystic-center lighting revert                   # restore the MCU's saved lighting
+  mystic-center lighting sync --color FF00AA      # all-sync solid colour
+  mystic-center lighting sync --rainbow           # all-sync rainbow preset
+  mystic-center lighting info                     # MCU firmware + language
+  mystic-center lighting rainbow --dir 0          # band conveyor right→left
+  mystic-center lighting sweep                    # light zones one-by-one (mapping check)
+  mystic-center lighting profile save "My Look"
+  mystic-center lighting profile list|apply NAME|delete NAME
+  mystic-center lighting apply                    # re-apply saved state (login/autostart)
+  mystic-center lighting test-effects | test-zones
 """
 
 from __future__ import annotations
@@ -115,7 +115,7 @@ def parse_zone_list(s: str) -> list[int]:
 
 
 def main(argv=None) -> int:
-    p = argparse.ArgumentParser(prog="mystic-control", description=__doc__,
+    p = argparse.ArgumentParser(prog="mystic-center lighting", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 

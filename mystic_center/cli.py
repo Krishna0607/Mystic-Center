@@ -102,8 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("wmi2", help="inspect the MSI WMI platform interface")
     sub.add_parser("gui", help="open the dashboard")
 
-    lp = sub.add_parser("lighting", help="run a legacy lighting CLI command")
-    lp.add_argument("args", nargs="*", help="passed to the lighting CLI")
+    sub.add_parser("lighting", help="keyboard RGB control (device, effects, profiles)")
 
     return p
 
@@ -185,16 +184,16 @@ def _run_fan_curve(c, args) -> int:
 
 
 def run(argv: list[str]) -> int:
+    if argv and argv[0] == "lighting":
+        # forward everything verbatim so the lighting CLI owns -h/--help
+        from .lighting.cli import main as light_main
+        return light_main(argv[1:] or ["-h"])
     p = build_parser()
     args = p.parse_args(argv)
 
     if args.cmd is None or args.cmd == "gui":
         from .gui import main as gui_main
         return gui_main()
-
-    if args.cmd == "lighting":
-        from .lighting.cli import main as light_main
-        return light_main(args.args)
 
     try:
         with daemon_client.Client() as c:

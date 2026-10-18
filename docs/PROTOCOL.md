@@ -149,8 +149,8 @@ Zone↔physical mapping
 ---------------------
 
 24 zones, 4 columns × 6 rows (row-major: `zone = row * 4 + column`). Verified
-visually with `mystic-control sweep` — each zone lights white in order,
-printing its index.
+visually with `mystic-center lighting sweep` — each zone lights white in
+order, printing its index.
 
 Sources
 -------
@@ -176,8 +176,8 @@ Open questions / to verify with the physical device
   in rainbow mode at all three speeds (2026-10-18).
 * If firmware effects stop responding after heavy per-zone write bursts, the
   MCU can sit in a stale state (observed once; wave was ignored until the
-  keyboard was re-initialised). `mystic-control reset` (`[2,255]`), the MCU
-  `save`+`revert` pair, or a replug clear it.
+  keyboard was re-initialised). `mystic-center lighting reset` (`[2,255]`), the
+  MCU `save`+`revert` pair, or a replug clear it.
 * Dance behaviour when colour balls are omitted (this app sends none; MSI
   itself sends stale bytes).
 * The 1-byte reports (id 4–7) may hide brightness control or numlock mode.
