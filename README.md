@@ -47,19 +47,20 @@ motivated it is in [`docs/MSI-CENTER-RE.md`](docs/MSI-CENTER-RE.md).
 
 ### Software
 
-A systemd Linux distribution (developed on CachyOS, kernel 7.2.x):
+A [systemd](https://systemd.io/) Linux distribution (developed on
+[CachyOS](https://cachyos.org/), kernel 7.2.x):
 
 | Need | How to check | What it enables |
 |---|---|---|
-| Python 3.10+ | `python3 --version` | everything |
-| PyGObject + GTK 4 + libadwaita | `python3 -c 'import gi; gi.require_version("Gtk","4.0"); gi.require_version("Adw","1")'` | the GUI (`install.sh` refuses to run without it) |
-| `msi-ec` kernel driver | `ls /sys/devices/platform/msi-ec` | platform modes, battery limits, fan modes, webcam/Fn switches |
-| `msi_wmi_platform` + debugfs | `ls /sys/kernel/debug/msi-wmi-platform-*` | custom fan curves (WMI2 tables). If missing, everything except custom fan curves still works, and the app tells you why. |
-| `ec_sys` write support | `cat /sys/module/ec_sys/parameters/write_support` → `Y` | advanced fan mode; installed by `install.sh --system` (a reboot may be needed once for the module to come up with `write_support=1`) |
-| `wheel` group | `id -nG \| grep -w wheel` | the daemon accepts RPC from root and `wheel` members (default on Arch/Fedora; otherwise `sudo usermod -aG wheel $USER` + re-login) |
-| hidraw access to the keyboard | `lsusb -d 1462:1603`, `ls /dev/hidraw*` | keyboard lighting; granted by the udev rule from `install.sh --system` |
-| `nvidia-smi` (optional) | `nvidia-smi -L` | GPU temps/usage in the overview |
-| `git`, `sudo` | — | clone + install |
+| [Python 3.10+](https://www.python.org/) | `python3 --version` | everything |
+| [PyGObject](https://gitlab.gnome.org/GNOME/pygobject) + [GTK 4](https://gitlab.gnome.org/GNOME/gtk) + [libadwaita](https://gitlab.gnome.org/GNOME/libadwaita) | `python3 -c 'import gi; gi.require_version("Gtk","4.0"); gi.require_version("Adw","1")'` | the GUI (`install.sh` refuses to run without it) |
+| [`msi-ec` kernel driver](https://github.com/BeardOverflow/msi-ec) ([in-tree source](https://github.com/torvalds/linux/blob/master/drivers/platform/x86/msi-ec.c)) | `ls /sys/devices/platform/msi-ec` | platform modes, battery limits, fan modes, webcam/Fn switches |
+| [`msi_wmi_platform` + debugfs](https://github.com/torvalds/linux/blob/master/drivers/platform/x86/msi-wmi-platform.c) | `ls /sys/kernel/debug/msi-wmi-platform-*` | custom fan curves (WMI2 tables). If missing, everything except custom fan curves still works, and the app tells you why. |
+| [`ec_sys` write support](https://github.com/torvalds/linux/blob/master/drivers/acpi/ec_sys.c) | `cat /sys/module/ec_sys/parameters/write_support` → `Y` | advanced fan mode; installed by `install.sh --system` (a reboot may be needed once for the module to come up with `write_support=1`) |
+| [`wheel` group](https://wiki.archlinux.org/title/Users_and_groups#Group_management) | `id -nG \| grep -w wheel` | the daemon accepts RPC from root and `wheel` members (default on Arch/Fedora; otherwise `sudo usermod -aG wheel $USER` + re-login) |
+| [hidraw](https://docs.kernel.org/hid/hidraw.html) access to the keyboard | `lsusb -d 1462:1603`, `ls /dev/hidraw*` | keyboard lighting; granted by the udev rule from `install.sh --system` |
+| [`nvidia-smi`](https://www.nvidia.com/en-us/drivers/unix/) (optional) | `nvidia-smi -L` | GPU temps/usage in the overview |
+| [`git`](https://git-scm.com/), [`sudo`](https://www.sudo.ws/) | — | clone + install |
 
 GUI packages per distribution (the CLI and daemon need only Python itself):
 
