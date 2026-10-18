@@ -165,7 +165,7 @@ DIRECTION_LABELS = {DIR_LEFT: "Left", DIR_RIGHT: "Right",
 
 # Wave length byte (payload[7]) per effect, MSI Center values * 10.
 WAVELENGTH = {"wave": 8, "wheel": 5, "wheel_custom": 3,
-              "bouncy": 2, "bouncy_custom": 3,
+              "bouncy": 2,
               "legacy": 50}  # steady/breath/cycle: MSI leaves the stale 50
 
 # Rainbow colour streams (position, r, g, b).  MSI Center's

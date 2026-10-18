@@ -207,10 +207,10 @@ class LightingState:
                           direction=0 if d == effects.DIR_CW else 1)
             return
         if eff == "bouncy":
-            wl = effects.WAVELENGTH["bouncy"] if mode == "rainbow" \
-                else effects.WAVELENGTH["bouncy_custom"]
+            # MSI fixes the period at 1.0 s and the wavelength at 0.2 (byte 2)
+            # for both rainbow and customized modes.
             kb.msi_effect(effects.EFFECT_BOUNCY, balls, zones=zones, speed=100,
-                          wavelength_tenths=wl,
+                          wavelength_tenths=effects.WAVELENGTH["bouncy"],
                           wave_mode=1 if mode == "rainbow" else 0,
                           direction=1)
             return

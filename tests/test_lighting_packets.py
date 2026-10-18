@@ -358,7 +358,7 @@ def main() -> int:
                       for i in range(5)]),
           ball_bytes(effects.balls_wheel(["FF0000", "FFFF00", "00FFFF"])))
 
-    # Bouncy ball — MSI type 7, fixed 1.0 s speed; rainbow wl 2 / custom wl 3.
+    # Bouncy ball — MSI type 7, fixed 1.0 s speed, wavelength 2 in both modes.
     st = prof.LightingState(effect="bouncy", color_mode="rainbow")
     pkts = run(kb, st.apply_to, kb)
     check("apply_to(bouncy rainbow): type 7, wl 2, mode 1, speed 100",
@@ -368,8 +368,8 @@ def main() -> int:
     st = prof.LightingState(effect="bouncy", color_mode="customized",
                             colors=["12C0FF"])
     pkts = run(kb, st.apply_to, kb)
-    check("apply_to(bouncy custom): wl 3, mode 0",
-          (pkts[1][7], pkts[1][8]), (3, 0))
+    check("apply_to(bouncy custom): wl 2, mode 0",
+          (pkts[1][7], pkts[1][8]), (2, 0))
     check("apply_to(bouncy custom): black/colour/black balls",
           pkts[1][10:22],
           bytes([0, 0, 0, 0, 50, 0x12, 0xC0, 0xFF, 100, 0, 0, 0]))

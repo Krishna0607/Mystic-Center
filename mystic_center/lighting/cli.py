@@ -168,6 +168,7 @@ def main(argv=None) -> int:
     add("custom-apply", "Customize mode: re-apply the stored zone styles")
     add("save", "persist current lighting into the keyboard's memory (MCU save)")
     add("revert", "restore the keyboard's saved lighting (MSI Center Cancel)")
+    add("reset", "reset the keyboard MCU (recovery for a wedged MCU)")
     sp = add("sync", "MSI all-device sync command (drives this keyboard)")
     mx = sp.add_mutually_exclusive_group()
     mx.add_argument("--color", default=None, help="solid colour hex (default FF0000)")
@@ -335,7 +336,10 @@ def main(argv=None) -> int:
                 state.color_mode = "customized"
             if cs:
                 state.colors = cs
-            state.speed, state.speed_index = parse_speed(args.cmd, args.speed)
+            if args.cmd != "bouncy":
+                # firmware-fixed 1.0 s; MSI Center exposes no speed control
+                state.speed, state.speed_index = parse_speed(args.cmd,
+                                                             args.speed)
             if args.cmd == "wave":
                 state.direction = (effects.DIR_LEFT if args.dir == "left"
                                    else effects.DIR_RIGHT)
@@ -344,6 +348,17 @@ def main(argv=None) -> int:
                                    else effects.DIR_CW)
         state.apply_to(kb)
         prof.save_state(state)
+        if args.cmd == "dance":
+            print(f"applied dance · speed {state.speed:g}s")
+        else:
+            parts = [f"applied {args.cmd}", f"mode {state.color_mode}"]
+            if state.color_mode != "rainbow":
+                cols = "/".join("#" + c.lstrip("#")
+                                for c in state.effective_colors()[:3])
+                parts.append(cols)
+            if args.cmd in ("wave", "wheel"):
+                parts.append(f"dir {args.dir}")
+            print(" · ".join(parts))
         return 0
 
     if args.cmd == "custom-set":
@@ -393,6 +408,11 @@ def main(argv=None) -> int:
     if args.cmd == "revert":
         kb.mcu_cancel()
         print("keyboard lighting restored from MCU memory")
+        return 0
+
+    if args.cmd == "reset":
+        kb.mcu_reset()
+        print("keyboard MCU reset command sent ([2,255])")
         return 0
 
     if args.cmd == "sync":

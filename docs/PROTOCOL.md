@@ -67,7 +67,7 @@ Payload layout (offset 0 = first byte after report id):
  [4]     u8     key-centre X   (wave: 0;  wheel/bouncy: 0)
  [5]     u8     key-centre Y   (wave: 50; wheel/bouncy: 0)
  [6]     u8     wavelength * 10  (wave 8, wheel 5 / custom 3,
-                                  bouncy 2 / custom 3; steady/breath/
+                                  bouncy 2; steady/breath/
                                   cycle: MSI leaves a stale 50)
  [7]     u8     wave mode: 1 = full-screen/rainbow, 0 = part-screen/custom
                  (steady/breath/cycle: MSI leaves a stale 0x08)
@@ -87,7 +87,7 @@ Payload layout (offset 0 = first byte after report id):
 | Wave    | 5 / 3.5 / 2                | 0 = left, 1 = right; centre (0,50), wavelength 8 | |
 | Dance   | 3 / 2 / 1                  | –              | MSI clears all zones first, then sends Dance with no colour balls |
 | Wheel   | 5 / 3.5 / 2                | 0 = clockwise, 1 = counterclockwise; wavelength 5 (rainbow) / 3 (custom) | |
-| Bouncy  | fixed 1.0                  | 1              | wavelength 2 (rainbow) / 3 (custom) |
+| Bouncy  | fixed 1.0                  | 1              | wavelength 2 (both modes) |
 
 ### Colour balls (MSI's `Set_ColorBall_Normal` / `Set_ColorBall_Rainbow`)
 
@@ -171,8 +171,13 @@ Sources
 Open questions / to verify with the physical device
 --------------------------------------------------
 
-* Whether the MCU honours wave/bouncy sender-side parameters (centre,
-  wavelength) identically on this firmware revision.
+* Wave plays on this firmware revision with MSI's exact parameters — centre
+  (0,50), wavelength byte 8, speeds 5/3.5/2 s, direction 0/1 — validated live
+  in rainbow mode at all three speeds (2026-10-18).
+* If firmware effects stop responding after heavy per-zone write bursts, the
+  MCU can sit in a stale state (observed once; wave was ignored until the
+  keyboard was re-initialised). `mystic-control reset` (`[2,255]`), the MCU
+  `save`+`revert` pair, or a replug clear it.
 * Dance behaviour when colour balls are omitted (this app sends none; MSI
   itself sends stale bytes).
 * The 1-byte reports (id 4–7) may hide brightness control or numlock mode.
