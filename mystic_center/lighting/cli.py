@@ -6,9 +6,20 @@ Examples:
   mystic-control steady FF7000            # all zones steady orange
   mystic-control zone 3 FF0055            # paint zone 3
   mystic-control zones "FF0000 0022FF 00CC22 ..."   # all 24 zones, in order
-  mystic-control cycle                     # whole-board color cycle
-  mystic-control rainbow --dir 0           # band conveyor right→left
-  mystic-control breath FF2040
+  mystic-control breath FF2040            # MSI breathing
+  mystic-control cycle --speed 6          # MSI color cycle (or slow|medium|fast)
+  mystic-control wave --rainbow --dir right --speed medium   # MSI Wave
+  mystic-control dance --speed fast       # MSI Dance
+  mystic-control wheel --colors FF0000,FFFF00,00FFFF --dir cw
+  mystic-control bouncy --colors 00FFFF   # MSI Bouncy Ball
+  mystic-control custom-set 0-7 steady --colors FF0000   # per-zone styles
+  mystic-control custom-apply             # push stored per-zone styles
+  mystic-control save                     # persist to the keyboard (MCU)
+  mystic-control revert                   # restore the MCU's saved lighting
+  mystic-control sync --color FF00AA      # all-sync solid colour
+  mystic-control sync --rainbow           # all-sync rainbow preset
+  mystic-control info                     # MCU firmware + language
+  mystic-control rainbow --dir 0          # band conveyor right→left
   mystic-control sweep                    # light zones one-by-one (mapping check)
   mystic-control profile save "My Look"
   mystic-control profile list|apply NAME|delete NAME
@@ -28,6 +39,37 @@ from . import effects
 from .effects import hex_to_rgb, rgb_to_hex, gradient, hsl_hex
 from .hid import DeviceNotFound, find_hidraw
 from .keyboard import NUM_ZONES, MysticKeyboard
+
+SPEED_WORDS = {"slow": 0, "medium": 1, "fast": 2}
+
+
+def parse_speed(effect: str, value: str | None) -> tuple[float, int]:
+    """MSI speed radio: slow|medium|fast (or seconds → nearest preset)."""
+    if value is None:
+        return effects.SPEED_TABLE[effect][1], 1
+    word = str(value).strip().lower()
+    if word in SPEED_WORDS:
+        idx = SPEED_WORDS[word]
+        return effects.SPEED_TABLE[effect][idx], idx
+    try:
+        secs = float(word)
+    except ValueError:
+        raise SystemExit(f"bad speed: {value!r} (use slow|medium|fast or seconds)")
+    table = effects.SPEED_TABLE[effect]
+    idx = min(range(3), key=lambda i: abs(table[i] - secs))
+    return secs, idx
+
+
+def parse_colors(value: str | None) -> list[str] | None:
+    if value is None:
+        return None
+    toks = [t for t in value.replace(",", " ").split() if t]
+    out = []
+    for t in toks:
+        h = t.upper().lstrip("#")
+        effects.hex_to_rgb(h)  # validate
+        out.append(h)
+    return out
 
 NO_DEVICE = (
     "\n  ✗ MSI MysticLight keyboard not found.\n"
@@ -92,15 +134,50 @@ def main(argv=None) -> int:
     sp.add_argument("--out", action="store_true", help="use direct per-zone output report")
     sp = add("zones", "24 colors: space or comma separated hex list")
     sp.add_argument("colors")
-    sp = add("cycle", "whole-board color cycle").add_argument("--speed", type=float, default=6.0)
+    sp = add("cycle", "MSI Color Cycle")
+    sp.add_argument("--speed", default="medium", help="slow|medium|fast (or seconds)")
+    sp.add_argument("--colors", default=None, help="customized colour list")
+    sp.add_argument("--rainbow", action="store_true", help="Rainbow colour mode")
+    sp = add("breath", "MSI Breathing")
+    sp.add_argument("color")
+    sp.add_argument("--speed", default="medium", help="slow|medium|fast (or seconds)")
+    sp = add("wave", "MSI Wave — colour bands sweeping across the deck")
+    sp.add_argument("--colors", default=None, help="customized colour list")
+    sp.add_argument("--rainbow", action="store_true", help="Rainbow colour mode")
+    sp.add_argument("--speed", default="medium", help="slow|medium|fast (or seconds)")
+    sp.add_argument("--dir", default="right", choices=["left", "right"])
+    sp = add("dance", "MSI Dance — whole-board dance animation")
+    sp.add_argument("--speed", default="medium", help="slow|medium|fast (or seconds)")
+    sp = add("wheel", "MSI Wheel — colour wheel spinning on the deck")
+    sp.add_argument("--colors", default=None, help="up to 3 customized colours")
+    sp.add_argument("--rainbow", action="store_true", help="Rainbow colour mode")
+    sp.add_argument("--speed", default="medium", help="slow|medium|fast (or seconds)")
+    sp.add_argument("--dir", default="cw", choices=["cw", "ccw"])
+    sp = add("bouncy", "MSI Bouncy Ball")
+    sp.add_argument("--colors", default=None, help="customized colour list")
+    sp.add_argument("--rainbow", action="store_true", help="Rainbow colour mode")
+    sp = add("custom-set", "Customize mode: style zones (ZONES e.g. 0-5,8)")
+    sp.add_argument("zones")
+    sp.add_argument("effect", choices=["off", "steady", "breath", "cycle",
+                                       "wave", "dance"])
+    sp.add_argument("--colors", default=None)
+    sp.add_argument("--speed", default=None, help="slow|medium|fast (or seconds)")
+    sp.add_argument("--dir", default="right", choices=["left", "right"])
+    sp = add("custom-clear", "Customize mode: turn zones off / plain steady")
+    sp.add_argument("zones")
+    add("custom-apply", "Customize mode: re-apply the stored zone styles")
+    add("save", "persist current lighting into the keyboard's memory (MCU save)")
+    add("revert", "restore the keyboard's saved lighting (MSI Center Cancel)")
+    sp = add("sync", "MSI all-device sync command (drives this keyboard)")
+    mx = sp.add_mutually_exclusive_group()
+    mx.add_argument("--color", default=None, help="solid colour hex (default FF0000)")
+    mx.add_argument("--rainbow", action="store_true", help="rainbow preset")
+    add("info", "read MCU firmware version + keyboard language")
     sp = add("rainbow", "rainbow band conveyor (up to 5 random colours marching)")
     sp.add_argument("--speed", type=float, default=6.0,
                     help="seconds per full 5-band lap (3..12)")
     sp.add_argument("--dir", type=int, default=1)
-    sp = add("breath", "breathing color").add_argument("color")
     sp = add("off", "turn lighting off").add_argument("-z", "--zones", default=None)
-    sp = add("level", "level byte 0..100 (MSI Center constant is 50)")
-    sp.add_argument("value", type=int)
     sp = add("sweep", "light every zone in order for visual mapping")
     sp.add_argument("--step", type=float, default=0.9)
     add("test-effects", "cycle through every effect briefly")
@@ -163,6 +240,8 @@ def main(argv=None) -> int:
         state = prof.load_state()
         state.effect = "steady"
         state.color = args.color.upper()
+        state.colors = [args.color.upper().lstrip("#")]
+        state.color_mode = "customized"
         if zones is not None:
             for z in zones:
                 state.zone_colors[str(z)] = args.color.upper()
@@ -176,6 +255,9 @@ def main(argv=None) -> int:
             kb.steady(args.color.upper(), zones=[args.zone_index])
         state = prof.load_state()
         state.effect = "steady"
+        state.color = args.color.upper()
+        state.colors = [args.color.upper().lstrip("#")]
+        state.color_mode = "customized"
         state.zone_colors[str(args.zone_index)] = args.color.upper()
         prof.save_state(state)
         return 0
@@ -203,10 +285,17 @@ def main(argv=None) -> int:
         return 0
 
     if args.cmd == "cycle":
-        kb.cycle(speed=int(round(args.speed * 100)))
         state = prof.load_state()
         state.effect = "cycle"
-        state.speed = args.speed
+        state.speed, state.speed_index = parse_speed("cycle", args.speed)
+        cs = parse_colors(args.colors)
+        if args.rainbow:
+            state.color_mode = "rainbow"
+        elif cs:
+            state.color_mode = "customized"
+        if cs:
+            state.colors = cs
+        state.apply_to(kb)
         prof.save_state(state)
         return 0
 
@@ -223,11 +312,110 @@ def main(argv=None) -> int:
         return 0
 
     if args.cmd == "breath":
-        kb.breath(args.color.upper())
         state = prof.load_state()
         state.effect = "breath"
-        state.color = args.color.upper()
+        state.color = args.color.upper().lstrip("#")
+        state.colors = [state.color]
+        state.color_mode = "customized"
+        state.speed, state.speed_index = parse_speed("breath", args.speed)
+        state.apply_to(kb)
         prof.save_state(state)
+        return 0
+
+    if args.cmd in ("wave", "dance", "wheel", "bouncy"):
+        state = prof.load_state()
+        state.effect = args.cmd
+        if args.cmd == "dance":
+            state.speed, state.speed_index = parse_speed("dance", args.speed)
+        else:
+            cs = parse_colors(args.colors)
+            if args.rainbow:
+                state.color_mode = "rainbow"
+            elif cs:
+                state.color_mode = "customized"
+            if cs:
+                state.colors = cs
+            state.speed, state.speed_index = parse_speed(args.cmd, args.speed)
+            if args.cmd == "wave":
+                state.direction = (effects.DIR_LEFT if args.dir == "left"
+                                   else effects.DIR_RIGHT)
+            elif args.cmd == "wheel":
+                state.direction = (effects.DIR_CCW if args.dir == "ccw"
+                                   else effects.DIR_CW)
+        state.apply_to(kb)
+        prof.save_state(state)
+        return 0
+
+    if args.cmd == "custom-set":
+        zones = parse_zone_list(args.zones)
+        state = prof.load_state()
+        state.effect = "custom"
+        table_effect = args.effect if args.effect in effects.SPEED_TABLE \
+            else "breath"
+        _, idx = parse_speed(table_effect, args.speed)
+        style: dict = {"effect": args.effect, "speed_index": idx}
+        cs = parse_colors(args.colors)
+        if cs:
+            style["colors"] = cs
+        if args.effect == "wave":
+            style["direction"] = (effects.DIR_LEFT if args.dir == "left"
+                                  else effects.DIR_RIGHT)
+        for z in zones:
+            state.zone_styles[str(z)] = dict(style)
+        state.apply_to(kb)
+        prof.save_state(state)
+        print(f"customize: {args.effect} on zones "
+              f"{','.join(map(str, zones))}")
+        return 0
+
+    if args.cmd == "custom-clear":
+        zones = parse_zone_list(args.zones)
+        state = prof.load_state()
+        for z in zones:
+            state.zone_styles[str(z)] = {"effect": "off"}
+        state.effect = "custom"
+        state.apply_to(kb)
+        prof.save_state(state)
+        return 0
+
+    if args.cmd == "custom-apply":
+        state = prof.load_state()
+        state.effect = "custom"
+        state.apply_to(kb)
+        prof.save_state(state)
+        return 0
+
+    if args.cmd == "save":
+        kb.mcu_save()
+        print("lighting saved into the keyboard's memory (MCU)")
+        return 0
+
+    if args.cmd == "revert":
+        kb.mcu_cancel()
+        print("keyboard lighting restored from MCU memory")
+        return 0
+
+    if args.cmd == "sync":
+        kb.allsync_begin()
+        if args.rainbow:
+            kb.allsync_rainbow()
+            print("all-sync rainbow preset sent")
+        else:
+            h = (args.color or "FF0000").upper().lstrip("#")
+            r, g, b = hex_to_rgb(h)
+            kb.allsync_rgb(r, g, b)
+            print(f"all-sync colour #{h} sent")
+        return 0
+
+    if args.cmd == "info":
+        fw = kb.firmware_version()
+        if fw is None:
+            print("firmware: no reply")
+        else:
+            hexs = " ".join(f"{b:02X}" for b in fw[:16])
+            pretty = "".join(chr(b) if 32 <= b < 127 else "." for b in fw[:16])
+            print(f"firmware reply: {hexs}   {pretty}")
+        print(f"language: {kb.language()}")
         return 0
 
     if args.cmd == "off":
@@ -240,14 +428,6 @@ def main(argv=None) -> int:
         prof.save_state(state)
         return 0
 
-    if args.cmd == "level":
-        kb.level = min(100, max(0, args.value))
-        state = prof.load_state()
-        state.level = kb.level
-        prof.save_state(state)
-        print(f"level byte persisted: {kb.level}")
-        return 0
-
     if args.cmd == "test-effects":
         kb.off()
         time.sleep(0.4)
@@ -255,10 +435,29 @@ def main(argv=None) -> int:
         print("steady red — 2s")
         time.sleep(2)
         kb.breath("#FF5030")
-        print("breath red — 2s")
+        print("MSI breathing red — 2s")
         time.sleep(2)
         kb.cycle()
-        print("rainbow cycle — 3s")
+        print("MSI color cycle — 3s")
+        time.sleep(3)
+        kb.msi_effect(effects.EFFECT_WAVE, effects.RAINBOW_STREAM, speed=500,
+                      center=(0, 50),
+                      wavelength_tenths=effects.WAVELENGTH["wave"],
+                      wave_mode=1, direction=1)
+        print("MSI wave rainbow → — 3s")
+        time.sleep(3)
+        kb.msi_effect(effects.EFFECT_WHEEL, effects.RAINBOW_STREAM, speed=500,
+                      wavelength_tenths=effects.WAVELENGTH["wheel"],
+                      wave_mode=1, direction=0)
+        print("MSI wheel rainbow — 3s")
+        time.sleep(3)
+        kb.msi_effect(effects.EFFECT_BOUNCY, effects.BOUNCY_RAINBOW_STREAM,
+                      speed=100, wavelength_tenths=effects.WAVELENGTH["bouncy"],
+                      wave_mode=1, direction=1)
+        print("MSI bouncy ball rainbow — 3s")
+        time.sleep(3)
+        kb.dance()
+        print("MSI dance — 3s")
         time.sleep(3)
         kb.rainbow(effects.random_band_colors())
         print("rainbow conveyor L→R — 3s")

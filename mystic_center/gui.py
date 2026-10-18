@@ -27,6 +27,7 @@ from .lighting.effects import gradient, hex_to_rgb, rgb_to_hex
 from .lighting.hid import DeviceNotFound, find_hidraw
 from .lighting.keyboard import NUM_ZONES, MysticKeyboard
 from .lighting.keyboard_view import KeyboardView
+from .lighting.profiles import GAMING_BASE, GAMING_RED, GAMING_RED_ZONES
 
 APP_ID = "org.mysticcenter.Center"
 APP_NAME = "Mystic Center"
@@ -1010,43 +1011,71 @@ ICON_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # 4 zone-columns) lives in lighting/layout.py and is drawn by
 # lighting/keyboard_view.py as one Cairo view with clickable zones.
 
-EFFECT_ORDER = ["steady", "breath", "rbreath", "cycle", "rainbow", "rain",
-                "fire", "radar", "lightning", "gaming", "off"]
+# MSI Center's own effect set for this keyboard first, then this app's extras.
+EFFECT_ORDER = ["off", "steady", "breath", "cycle", "wave", "dance", "wheel",
+                "bouncy", "custom",
+                "rainbow", "scycle", "spulse", "rbreath", "rain", "fire",
+                "radar", "lightning", "gaming"]
 EFFECT_NAMES = {
+    # MSI Center effects (firmware-driven, byte-identical to MSI Center)
+    "off": "Off",
     "steady": "Steady",
     "breath": "Breathing",
+    "cycle": "Color Cycle",
+    "wave": "Wave",
+    "dance": "Dance",
+    "wheel": "Wheel",
+    "bouncy": "Bouncy Ball",
+    "custom": "Customize",
+    # extra looks rendered by this app
+    "rainbow": "Rainbow Flow",
+    "scycle": "Spectrum Cycle",
+    "spulse": "Spectrum Pulse",
     "rbreath": "Rainbow Breath",
-    "cycle": "Colorful Cycle",
-    "rainbow": "Rainbow",
     "rain": "Rain",
     "fire": "Fire",
     "radar": "Radar",
     "lightning": "Lightning",
     "gaming": "Gaming",
-    "off": "Off",
 }
 
-# tuning rows shown per effect ("color" = color picker + palette row)
+# tuning rows shown per effect:
+#   msi       — color mode radio (Rainbow | Customized)
+#   colors    — MSI colour list editor + palette
+#   msi_speed — speed radio (Slow | Medium | Fast)
+#   wave_dir  — direction radio (Left | Right)
+#   wheel_dir — direction radio (Clockwise | Counterclockwise)
+#   speed / direction — software extras
+#   custom    — the per-zone Customize editor
 TUNING = {
-    "steady": ("color",),
-    "breath": ("color", "speed", "level"),
-    "rbreath": ("speed",),
-    "cycle": ("speed", "level"),
+    "off": (),
+    "steady": ("msi", "colors"),
+    "breath": ("msi", "colors", "msi_speed"),
+    "cycle": ("msi", "colors", "msi_speed"),
+    "wave": ("msi", "colors", "msi_speed", "wave_dir"),
+    "dance": ("msi_speed",),
+    "wheel": ("msi", "colors", "msi_speed", "wheel_dir"),
+    "bouncy": ("msi", "colors"),
+    "custom": ("custom",),
     "rainbow": ("speed", "direction"),
+    "scycle": ("speed",),
+    "spulse": ("speed",),
+    "rbreath": ("speed",),
     "rain": ("speed",),
     "fire": ("speed",),
     "radar": ("speed", "direction"),
     "lightning": ("speed",),
     "gaming": (),
-    "off": (),
 }
 
+# effects offered inside the Customize zone editor (MSI's own palette)
+CUSTOM_EFFECTS = ("off", "steady", "breath", "cycle", "wave", "dance")
+
 SPEED_TITLES = {
-    "steady": "Cycle length (seconds)",
-    "breath": "Cycle length (seconds)",
     "rbreath": "Cycle length (seconds)",
-    "cycle": "Cycle length (seconds)",
     "rainbow": "Rainbow lap (seconds)",
+    "scycle": "Cycle length (seconds)",
+    "spulse": "Pulse period (seconds)",
     "rain": "Activity (6 = natural)",
     "fire": "Flicker speed (6 = natural)",
     "radar": "Sweep period (seconds)",
@@ -1064,7 +1093,19 @@ PAGE_CSS = \
     "  border: 1px solid rgba(127,127,127,0.16); }\n" \
     ".effect-tile { border-radius: 12px; padding-left: 10px; padding-right: 10px; }\n" \
     ".effect-tile.active { border: 2px solid #3584e4;\n" \
-    "  background: rgba(53,132,228,0.14); }"
+    "  background: rgba(53,132,228,0.14); }\n" \
+    ".slot-active { background: rgba(53,132,228,0.16); border-radius: 8px; }"
+
+
+def hex_to_rgba(hexstr: str) -> Gdk.RGBA:
+    rgba = Gdk.RGBA()
+    rgba.parse("#" + hexstr.strip("#"))
+    return rgba
+
+
+def rgba_to_ints(rgba: Gdk.RGBA) -> tuple[int, int, int]:
+    clamp = lambda c: max(0, min(255, round(c * 255)))  # noqa: E731
+    return clamp(rgba.red), clamp(rgba.green), clamp(rgba.blue)
 
 
 class EffectTile(Gtk.Button):
@@ -1086,6 +1127,112 @@ class EffectTile(Gtk.Button):
         box.append(label)
         self.set_child(box)
         self.connect("clicked", page.on_effect_tile)
+
+
+class ColorSlots(Gtk.Box):
+    """Editable MSI colour list — one colour-dialog button per colour.
+
+    Clicking a row makes it the *active slot*; the palette swatches then
+    recolour that slot. `on_change` fires on add / remove / active change.
+    """
+
+    def __init__(self, max_colors: int = 5, on_change=None):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.max_colors = max_colors
+        self._slots: list[tuple[Gtk.Box, Gtk.ColorDialogButton,
+                                Gtk.Button]] = []
+        self._active = 0
+        self._on_change = on_change
+        self._list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.append(self._list)
+        self._add_btn = Gtk.Button(label="Add another colour")
+        self._add_btn.add_css_class("flat")
+        self._add_btn.connect("clicked", self._on_add)
+        self.append(self._add_btn)
+
+    # -- building ---------------------------------------------------------------
+
+    def _append(self, hexstr: str) -> None:
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        btn = Gtk.ColorDialogButton()
+        btn.set_dialog(Gtk.ColorDialog())
+        btn.set_rgba(hex_to_rgba(hexstr))
+        btn.connect("notify::rgba", lambda *_a: self._changed())
+        remove = Gtk.Button(icon_name="list-remove-symbolic")
+        remove.add_css_class("flat")
+        remove.set_tooltip_text("Remove this colour")
+        remove.connect("clicked", lambda *_a, r=row: self._remove(r))
+        click = Gtk.GestureClick()
+        click.connect("pressed",
+                      lambda _g, _n, _x, _y, r=row: self._select(r))
+        row.add_controller(click)
+        row.append(btn)
+        row.append(remove)
+        self._slots.append((row, btn, remove))
+        self._list.append(row)
+        self._refresh()
+
+    def _remove(self, row: Gtk.Box) -> None:
+        if len(self._slots) <= 1:
+            return  # always keep at least one colour
+        self._slots = [s for s in self._slots if s[0] is not row]
+        self._list.remove(row)
+        if self._active >= len(self._slots):
+            self._active = len(self._slots) - 1
+        self._refresh()
+        self._changed()
+
+    def _on_add(self, *_a) -> None:
+        if len(self._slots) >= self.max_colors:
+            return
+        self._append("FFFFFF")
+        self._active = len(self._slots) - 1
+        self._refresh()
+        self._changed()
+
+    def _select(self, row: Gtk.Box) -> None:
+        for i, (r, _b, _x) in enumerate(self._slots):
+            if r is row:
+                self._active = i
+        self._refresh()
+
+    def _changed(self) -> None:
+        if self._on_change:
+            self._on_change()
+
+    def _refresh(self) -> None:
+        self._add_btn.set_sensitive(len(self._slots) < self.max_colors)
+        for i, (row, _b, remove) in enumerate(self._slots):
+            row.remove_css_class("slot-active")
+            if i == self._active:
+                row.add_css_class("slot-active")
+            remove.set_sensitive(len(self._slots) > 1)
+
+    # -- interface ---------------------------------------------------------------
+
+    def set_colors(self, colors) -> None:
+        for row, _b, _x in list(self._slots):
+            self._list.remove(row)
+        self._slots = []
+        for hx in (colors or []):
+            self._append(hx)
+        if not self._slots:
+            self._append("00FFFF")
+        self._active = min(self._active, len(self._slots) - 1)
+        self._refresh()
+
+    def get_colors(self) -> list[str]:
+        out = []
+        for _row, btn, _x in self._slots:
+            r, g, b = rgba_to_ints(btn.get_rgba())
+            out.append(rgb_to_hex(r, g, b))
+        return out
+
+    def set_active_color(self, hexstr: str) -> None:
+        if not self._slots:
+            return
+        self._slots[self._active][1].set_rgba(hex_to_rgba(hexstr))
+        self._changed()
 
 
 class LightingPage(Page):
@@ -1210,13 +1357,19 @@ class LightingPage(Page):
             title=f"Tuning · {EFFECT_NAMES[self.state.effect]}")
         col.append(self.tuning_group)
 
-        color_row = Adw.ActionRow(title="Color")
-        self.color_btn = Gtk.ColorDialogButton()
-        self.color_btn.set_dialog(Gtk.ColorDialog())
-        self.color_btn.set_rgba(self._rgba(self.state.color))
-        color_row.add_prefix(self.color_btn)
-        self.tuning_group.add(color_row)
-        self.color_row = color_row
+        self.color_mode_row = Adw.ComboRow(title="Color mode")
+        self.color_mode_row.set_model(
+            Gtk.StringList.new(["Rainbow", "Customized"]))
+        self.color_mode_row.connect("notify::selected",
+                                    self.on_color_mode_changed)
+        self.tuning_group.add(self.color_mode_row)
+
+        self.colors_row = Adw.ActionRow(title="Colours")
+        self.colors_row.set_subtitle(
+            "The effect cycles / blends through these (max 5)")
+        self.colors_editor = ColorSlots(on_change=self.on_colors_changed)
+        self.colors_row.add_suffix(self.colors_editor)
+        self.tuning_group.add(self.colors_row)
 
         palette = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         for row_ in SWATCH_ROWS:
@@ -1232,6 +1385,14 @@ class LightingPage(Page):
         self.tuning_group.add(palette)
         self.palette_box = palette
 
+        self.msi_speed_row = Adw.ComboRow(title="Speed")
+        self.msi_speed_row.set_model(
+            Gtk.StringList.new(list(effects.SPEED_LABELS)))
+        self.tuning_group.add(self.msi_speed_row)
+
+        self.msi_dir_row = Adw.ComboRow(title="Direction")
+        self.tuning_group.add(self.msi_dir_row)
+
         self.speed_row = Adw.SpinRow.new_with_range(3.0, 12.0, 0.5)
         self.speed_row.set_title(SPEED_TITLES.get(self.state.effect,
                                                   "Cycle length (seconds)"))
@@ -1243,16 +1404,54 @@ class LightingPage(Page):
         self.dir_row.set_active(self.state.direction == 1)
         self.tuning_group.add(self.dir_row)
 
-        self.level_row = Adw.SpinRow.new_with_range(0, 100, 5)
-        self.level_row.set_title("Brightness (level byte)")
-        self.level_row.set_value(self.state.level)
-        self.tuning_group.add(self.level_row)
-
         self.apply_btn_row = Adw.SwitchRow(
             title="Apply to whole keyboard",
             subtitle="Off = only the selected zones change (Steady only)")
         self.apply_btn_row.set_active(True)
         self.tuning_group.add(self.apply_btn_row)
+
+        # Customize (MSI per-zone styles) ------------------------------------
+        self.custom_group = Adw.PreferencesGroup(
+            title="Customize · per-zone styles",
+            description="Select zones on the keyboard, choose a look, then "
+                        "Assign. Each zone keeps its own effect — press "
+                        "Apply to send the map.")
+        col.append(self.custom_group)
+
+        self.custom_effect_row = Adw.ComboRow(title="Zone effect")
+        self.custom_effect_row.set_model(Gtk.StringList.new(
+            [EFFECT_NAMES[k] for k in CUSTOM_EFFECTS]))
+        self.custom_effect_row.set_selected(CUSTOM_EFFECTS.index("steady"))
+        self.custom_effect_row.connect("notify::selected",
+                                       self.on_custom_tuning)
+        self.custom_group.add(self.custom_effect_row)
+
+        self.custom_colors_row = Adw.ActionRow(title="Zone colours")
+        self.custom_colors = ColorSlots()
+        self.custom_group.add(self.custom_colors_row)
+        self.custom_colors_row.add_suffix(self.custom_colors)
+
+        self.custom_speed_row = Adw.ComboRow(title="Zone speed")
+        self.custom_speed_row.set_model(
+            Gtk.StringList.new(list(effects.SPEED_LABELS)))
+        self.custom_speed_row.set_selected(1)
+        self.custom_group.add(self.custom_speed_row)
+
+        self.custom_dir_row = Adw.ComboRow(title="Wave direction")
+        self.custom_dir_row.set_model(Gtk.StringList.new(["Left", "Right"]))
+        self.custom_dir_row.set_selected(1)
+        self.custom_group.add(self.custom_dir_row)
+
+        cacts = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        cacts.set_halign(Gtk.Align.CENTER)
+        for label, handler in [("Assign to selected zones",
+                                self.on_custom_assign),
+                               ("Off · selected zones", self.on_custom_off)]:
+            b = Gtk.Button(label=label)
+            b.add_css_class("pill")
+            b.connect("clicked", handler)
+            cacts.append(b)
+        self.custom_group.add(cacts)
 
         # Apply --------------------------------------------------------------
         g_apply = Adw.PreferencesGroup(title="Apply")
@@ -1266,8 +1465,20 @@ class LightingPage(Page):
         off_btn = Gtk.Button(label="Turn Off")
         off_btn.add_css_class("pill")
         off_btn.connect("clicked", self.on_off)
-        actions.append(self.apply_btn)
-        actions.append(off_btn)
+        save_btn = Gtk.Button(label="Save to keyboard")
+        save_btn.add_css_class("pill")
+        save_btn.set_tooltip_text(
+            "Persist the current lighting into the keyboard's memory "
+            "(MSI Center's Save — the look survives a restart)")
+        save_btn.connect("clicked", self.on_mcu_save)
+        restore_btn = Gtk.Button(label="Restore saved")
+        restore_btn.add_css_class("pill")
+        restore_btn.set_tooltip_text(
+            "Reload the lighting stored in the keyboard's memory "
+            "(MSI Center's Cancel)")
+        restore_btn.connect("clicked", self.on_mcu_restore)
+        for b in (self.apply_btn, off_btn, save_btn, restore_btn):
+            actions.append(b)
         g_apply.add(actions)
 
         self.autostart_row = Adw.SwitchRow(
@@ -1308,14 +1519,11 @@ class LightingPage(Page):
 
     @staticmethod
     def _rgba(hexstr: str) -> Gdk.RGBA:
-        rgba = Gdk.RGBA()
-        rgba.parse("#" + hexstr.strip("#"))
-        return rgba
+        return hex_to_rgba(hexstr)
 
     @staticmethod
     def _rgba_ints(rgba: Gdk.RGBA) -> tuple[int, int, int]:
-        clamp = lambda c: max(0, min(255, round(c * 255)))  # noqa: E731
-        return clamp(rgba.red), clamp(rgba.green), clamp(rgba.blue)
+        return rgba_to_ints(rgba)
 
     def setup_css(self) -> None:
         self.provider = Gtk.CssProvider()
@@ -1339,22 +1547,63 @@ class LightingPage(Page):
 
     def _sync_effect_ui(self) -> None:
         """Selected-tile ring, dynamic titles, and relevant tuning rows."""
-        eff = self.state.effect
-        show = set(TUNING.get(eff, ()))
-        self.color_row.set_visible("color" in show)
-        self.palette_box.set_visible("color" in show)
-        self.speed_row.set_visible("speed" in show)
-        self.speed_row.set_title(SPEED_TITLES.get(eff, "Cycle length (seconds)"))
-        self.dir_row.set_visible("direction" in show)
-        self.level_row.set_visible("level" in show)
-        self.level_row.set_title("Brightness (level byte)")
-        self.apply_btn_row.set_visible(eff == "steady")
-        self.tuning_group.set_title(f"Tuning · {EFFECT_NAMES[eff]}")
-        for key, tile in self.tiles.items():
-            if key == eff:
-                tile.add_css_class("active")
+        self._syncing = True
+        try:
+            eff = self.state.effect
+            show = set(TUNING.get(eff, ()))
+            msi = "msi" in show
+            customized = self.state.color_mode == "customized"
+            if not self.state.colors:
+                self.state.colors = [self.state.color.lstrip("#").upper()]
+            self.color_mode_row.set_selected(
+                0 if self.state.color_mode == "rainbow" else 1)
+            self.color_mode_row.set_visible(msi)
+            self.colors_row.set_visible(msi and customized)
+            self.palette_box.set_visible(msi and customized)
+            self.colors_editor.set_colors(self.state.colors)
+            self.msi_speed_row.set_visible("msi_speed" in show)
+            self.msi_speed_row.set_selected(self.state.speed_index)
+            if "wave_dir" in show:
+                self.msi_dir_row.set_title("Wave direction")
+                self.msi_dir_row.set_model(
+                    Gtk.StringList.new(["Left", "Right"]))
+                self.msi_dir_row.set_selected(
+                    0 if self.state.direction == effects.DIR_LEFT else 1)
+                self.msi_dir_row.set_visible(True)
+            elif "wheel_dir" in show:
+                self.msi_dir_row.set_title("Direction")
+                self.msi_dir_row.set_model(
+                    Gtk.StringList.new(["Clockwise", "Counterclockwise"]))
+                self.msi_dir_row.set_selected(
+                    0 if self.state.direction == effects.DIR_CW else 1)
+                self.msi_dir_row.set_visible(True)
             else:
-                tile.remove_css_class("active")
+                self.msi_dir_row.set_visible(False)
+            self.speed_row.set_visible("speed" in show)
+            self.speed_row.set_title(SPEED_TITLES.get(
+                eff, "Cycle length (seconds)"))
+            self.speed_row.set_value(self.state.speed)
+            self.dir_row.set_visible("direction" in show)
+            self.dir_row.set_active(self.state.direction != 0)
+            self.apply_btn_row.set_visible(eff == "steady")
+            self.custom_group.set_visible(eff == "custom")
+            if eff == "custom":
+                self._sync_custom_ui()
+            self.tuning_group.set_title(f"Tuning · {EFFECT_NAMES[eff]}")
+            for key, tile in self.tiles.items():
+                if key == eff:
+                    tile.add_css_class("active")
+                else:
+                    tile.remove_css_class("active")
+        finally:
+            self._syncing = False
+
+    def _sync_custom_ui(self) -> None:
+        e = CUSTOM_EFFECTS[self.custom_effect_row.get_selected()]
+        self.custom_dir_row.set_visible(e == "wave")
+        self.custom_speed_row.set_visible(
+            e in ("breath", "cycle", "wave", "dance"))
+        self.custom_colors_row.set_visible(e != "off")
 
     def refresh_profiles(self) -> None:
         self.user_profiles = prof.load_profiles()
@@ -1388,15 +1637,32 @@ class LightingPage(Page):
         """Representative frame for the current effect (static snapshot)."""
         st = self.state
         eff = st.effect
-        if eff == "steady":
-            return [st.zone_colors.get(str(z), st.color).lstrip("#")
-                    for z in range(NUM_ZONES)]
         if eff == "off":
             return ["16161C"] * NUM_ZONES
+        if eff == "steady":
+            if st.color_mode == "rainbow":
+                return list(effects.zone_rainbow_colors())
+            return [st.zone_colors.get(str(z), st.effective_colors()[0])
+                    .lstrip("#") for z in range(NUM_ZONES)]
         if eff == "breath":
-            r, g, b = hex_to_rgb(st.color)
-            return [rgb_to_hex(max(r // 2, 1), max(g // 2, 1), max(b // 2, 1))
-                    ] * NUM_ZONES
+            if st.color_mode == "rainbow":
+                return [effects.dim_hex(c, 0.45)
+                        for c in effects.zone_rainbow_colors()]
+            return [effects.dim_hex(st.effective_colors()[0], 0.45)] * NUM_ZONES
+        if eff in ("wave", "cycle", "wheel", "bouncy"):
+            return self._msi_band_preview(eff)
+        if eff == "dance":
+            from .lighting import animate
+            try:
+                eng = animate.get_engine("scycle", speed=st.speed,
+                                         direction=1, colors=None)
+                return [c.lstrip("#") for c in eng.colors(
+                    max(0.25, st.speed * 0.31))]
+            except KeyError:
+                return [effects.dim_hex(c, 0.5)
+                        for c in effects.zone_rainbow_colors()]
+        if eff == "custom":
+            return [self._custom_zone_preview(z) for z in range(NUM_ZONES)]
         if eff == "gaming":
             base = [GAMING_BASE.lstrip("#")] * NUM_ZONES
             for z in GAMING_RED_ZONES:
@@ -1404,9 +1670,8 @@ class LightingPage(Page):
             return base
         # software engine sample at a mid-animation instant
         from .lighting import animate
-        sw_eff = {"cycle": "scycle"}.get(eff, eff)  # hw cycle → same look
         try:
-            eng = animate.get_engine(sw_eff, speed=st.speed,
+            eng = animate.get_engine(eff, speed=st.speed,
                                      direction=st.direction,
                                      colors=getattr(st, "band_colors", None))
         except KeyError:
@@ -1420,6 +1685,46 @@ class LightingPage(Page):
                 t += 0.22
             return [c.lstrip("#") for c in eng.colors(t)]
         return [c.lstrip("#") for c in eng.colors(max(0.25, st.speed * 0.31))]
+
+    def _msi_band_preview(self, eff: str) -> list[str]:
+        """4-column snapshot for the MSI band effects (wave/cycle/wheel/…)."""
+        st = self.state
+        mode = st.color_mode
+        colors = st.effective_colors()
+        if eff == "bouncy":
+            if mode == "rainbow":
+                ball = effects.sample_balls(effects.RAINBOW_STREAM, 50)
+            else:
+                ball = effects.sample_balls(effects.balls_bouncy(colors), 50)
+            return [effects.dim_hex(ball, 0.6)] * NUM_ZONES
+        balls = effects.balls_for_effect(eff, mode, colors)
+        cols = [effects.sample_balls(balls, (c + 0.5) * 25) for c in range(4)]
+        if eff == "wave" and st.direction == effects.DIR_LEFT:
+            cols.reverse()
+        if eff == "wheel":
+            cols = [effects.dim_hex(c, 0.65) for c in cols]
+        return [cols[z % 4] for z in range(NUM_ZONES)]
+
+    def _custom_zone_preview(self, z: int) -> str:
+        st = self.state
+        style = st.zone_styles.get(str(z))
+        if not style:
+            return "16161C"
+        e = style.get("effect", "steady")
+        if e == "off":
+            return "16161C"
+        cols = [c.lstrip("#") for c in style.get("colors") or []]
+        if not cols:
+            cols = st.effective_colors()
+        c = cols[0]
+        if e == "breath":
+            return effects.dim_hex(c, 0.45)
+        if e in ("cycle", "wave"):
+            return effects.sample_balls(effects.balls_default(cols),
+                                        (z % 4 + 0.5) * 25)
+        if e == "dance":
+            return "FF00FF"
+        return c
 
     def sync_preview_from_state(self) -> None:
         self.preview_colors = self._sample_preview_colors()
@@ -1448,7 +1753,89 @@ class LightingPage(Page):
         self.kbview.set_selected(set())
 
     def on_swatch(self, _btn, hexstr: str) -> None:
-        self.color_btn.set_rgba(self._rgba(hexstr))
+        """Palette click — recolour the active slot of the visible editor."""
+        if self.state.effect == "custom":
+            self.custom_colors.set_active_color(hexstr)
+        elif self.colors_row.get_visible():
+            self.colors_editor.set_active_color(hexstr)
+
+    def on_color_mode_changed(self, *_a) -> None:
+        if getattr(self, "_syncing", False):
+            return
+        self.state.color_mode = (
+            "rainbow" if self.color_mode_row.get_selected() == 0
+            else "customized")
+        self._sync_effect_ui()
+        self.sync_preview_from_state()
+
+    def on_colors_changed(self) -> None:
+        if getattr(self, "_syncing", False):
+            return
+        cs = [c.upper().lstrip("#") for c in self.colors_editor.get_colors()]
+        if cs:
+            self.state.colors = cs
+            self.state.color = "#" + cs[0]
+        self.sync_preview_from_state()
+
+    def on_custom_tuning(self, *_a) -> None:
+        if getattr(self, "_syncing", False):
+            return
+        self._sync_custom_ui()
+
+    def on_custom_assign(self, *_a) -> None:
+        st = self.state
+        st.effect = "custom"
+        sel = sorted(self.selected) or list(range(NUM_ZONES))
+        e = CUSTOM_EFFECTS[self.custom_effect_row.get_selected()]
+        style: dict = {
+            "effect": e,
+            "speed_index": self.custom_speed_row.get_selected(),
+            "colors": [c.upper().lstrip("#")
+                       for c in self.custom_colors.get_colors()],
+        }
+        if e == "wave":
+            style["direction"] = (
+                effects.DIR_LEFT if self.custom_dir_row.get_selected() == 0
+                else effects.DIR_RIGHT)
+        for z in sel:
+            st.zone_styles[str(z)] = dict(style)
+        self._sync_effect_ui()
+        self.sync_preview_from_state()
+        self.window.toast(
+            f"{EFFECT_NAMES[e]} assigned to {len(sel)} zone(s) — press Apply")
+
+    def on_custom_off(self, *_a) -> None:
+        st = self.state
+        st.effect = "custom"
+        sel = sorted(self.selected) or list(range(NUM_ZONES))
+        for z in sel:
+            st.zone_styles[str(z)] = {"effect": "off"}
+        self._sync_effect_ui()
+        self.sync_preview_from_state()
+        self.window.toast(
+            f"zones {','.join(map(str, sel))} → off — press Apply")
+
+    def on_mcu_save(self, *_a) -> None:
+        kb = self._current_machine()
+        if kb is None:
+            return
+        try:
+            kb.mcu_save()
+        except Exception as e:
+            self.window.toast(f"save failed: {e}")
+            return
+        self.window.toast("lighting saved into the keyboard's memory")
+
+    def on_mcu_restore(self, *_a) -> None:
+        kb = self._current_machine()
+        if kb is None:
+            return
+        try:
+            kb.mcu_cancel()
+        except Exception as e:
+            self.window.toast(f"restore failed: {e}")
+            return
+        self.window.toast("keyboard lighting restored from its memory")
 
     def _current_machine(self) -> MysticKeyboard | None:
         try:
@@ -1460,11 +1847,32 @@ class LightingPage(Page):
             return None
 
     def _collect_state(self) -> None:
-        r, g, b = self._rgba_ints(self.color_btn.get_rgba())
-        self.state.color = rgb_to_hex(r, g, b)
-        self.state.speed = self.speed_row.get_value()
-        self.state.direction = 1 if self.dir_row.get_active() else 0
-        self.state.level = int(self.level_row.get_value())
+        st = self.state
+        show = set(TUNING.get(st.effect, ()))
+        if "colors" in show:
+            cs = [c.upper().lstrip("#")
+                  for c in self.colors_editor.get_colors()]
+            if cs:
+                st.colors = cs
+                st.color = "#" + cs[0]
+        if "msi" in show:
+            st.color_mode = (
+                "rainbow" if self.color_mode_row.get_selected() == 0
+                else "customized")
+        if "msi_speed" in show:
+            st.speed_index = self.msi_speed_row.get_selected()
+        if "wave_dir" in show:
+            st.direction = (
+                effects.DIR_LEFT if self.msi_dir_row.get_selected() == 0
+                else effects.DIR_RIGHT)
+        elif "wheel_dir" in show:
+            st.direction = (
+                effects.DIR_CW if self.msi_dir_row.get_selected() == 0
+                else effects.DIR_CCW)
+        if "speed" in show:
+            st.speed = self.speed_row.get_value()
+        if "direction" in show:
+            st.direction = 1 if self.dir_row.get_active() else 0
 
     def on_apply(self, *_a) -> None:
         self._collect_state()

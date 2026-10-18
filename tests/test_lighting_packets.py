@@ -32,11 +32,11 @@ class FakeHid:
     def ensure_open(self):
         pass
 
-    def send_feature(self, payload: bytes) -> bool:
+    def send_feature(self, payload: bytes, report_id: int = 2) -> bool:
         assert len(payload) <= 63, "payload overflow (>63 bytes cmd)"
         padded = bytes(payload).ljust(63, b"\x00")
         # record full wire report: report id byte + padded payload
-        self.sent.append(bytes([2]) + padded)
+        self.sent.append(bytes([report_id]) + padded)
         return True
 
     def read_ack(self):
@@ -256,16 +256,235 @@ def main() -> int:
           [rgb_of(bands[c]) for c in range(4)])
     check("apply_to(rainbow) direction from state", {p[9] for p in effs}, {0x00})
 
-    # legacy wave-named states/profiles load as rainbow
-    legacy = prof.LightingState(effect="wave", speed=6.0)
+    # legacy software-wave states/profiles load as rainbow; "wave" itself is
+    # now the real MSI Center Wave effect (firmware type 4)
+    legacy = prof.LightingState(effect="swave", speed=6.0)
     prof.save_state(legacy)
-    check("legacy 'wave' state migrates to rainbow",
+    check("legacy 'swave' state migrates to rainbow",
           prof.load_state().effect, "rainbow")
     try:
-        prof.LightingState(effect="wave").validate()
-        check("'wave' no longer a valid effect name", False, True)
+        w = prof.LightingState(effect="wave")
+        w.validate()
+        check("'wave' is valid (MSI wave), direction defaults right",
+              (w.effect, w.direction), ("wave", effects.DIR_RIGHT))
     except ValueError:
-        check("'wave' no longer a valid effect name", True, True)
+        check("'wave' is valid (MSI wave), direction defaults right",
+              False, True)
+
+    # --------------------------------------------------- MSI Center parity effects
+    # Byte-for-byte checks against MSI Center's Class_24Zone packet builder:
+    # wire = [02][02 effect speed u16le cx cy wavelength mode dir] balls…
+
+    def ball_bytes(balls) -> bytes:
+        return bytes(v for ball in balls for v in ball)
+
+    # colour-ball builders (MSI's Set_ColorBall_Normal / _Rainbow)
+    check("balls_default: colours at 100//n steps + wrap",
+          [b[0] for b in effects.balls_default(["FF0000", "00FF00", "0000FF"])],
+          [0, 33, 66, 100])
+    check("balls_default: wraps to colour 0",
+          effects.balls_default(["FF0000", "00FF00"])[-1], (100, 255, 0, 0))
+    check("balls_wheel: black in/out, colours at 15/50/85",
+          [b[0] for b in effects.balls_wheel(["FF0000", "FFFF00", "00FFFF"])],
+          [0, 15, 50, 85, 100])
+    check("balls_bouncy: black in/out, colour mid-track",
+          [b[0] for b in effects.balls_bouncy(["00FFFF"])], [0, 50, 100])
+    check("rainbow stream: MSI 7-ball positions 0/17/33/50/67/83/100",
+          [b[0] for b in effects.RAINBOW_STREAM],
+          [0, 17, 33, 50, 67, 83, 100])
+    check("zone rainbow groups cover all 24 zones",
+          sorted(z for g in effects.ZONE_RAINBOW_GROUPS for z in g),
+          list(range(24)))
+    check("sample_balls: midpoint blend of two colours",
+          effects.sample_balls(effects.balls_default(["FF0000", "0000FF"]),
+                               25), "800080")
+    check("dim_hex halves the channels", effects.dim_hex("804020", 0.5),
+          "402010")
+
+    # Wave — MSI type 4: centre (0,50), wavelength 8, full-screen mode 1,
+    # direction right; 7-ball rainbow stream.
+    pkts = run(kb, kb.msi_effect, effects.EFFECT_WAVE, effects.RAINBOW_STREAM,
+               speed=500, center=(0, 50),
+               wavelength_tenths=effects.WAVELENGTH["wave"], wave_mode=1,
+               direction=1)
+    check("wave: mask + one effect packet", len(pkts), 2)
+    check("wave: header (type 4, speed 500, centre 0/50, wl 8, mode 1, dir 1)",
+          pkts[1][1:10],
+          bytes([0x02, 0x04, 0xF4, 0x01, 0x00, 0x32, 0x08, 0x01, 0x01]))
+    check("wave: 7 rainbow balls", pkts[1][10:38],
+          ball_bytes(effects.RAINBOW_STREAM))
+
+    # via the profile layer (rainbow radio, medium speed)
+    st = prof.LightingState(effect="wave", color_mode="rainbow")
+    prof.save_state(st)
+    st = prof.load_state()
+    pkts = run(kb, st.apply_to, kb)
+    sp = int(effects.SPEED_TABLE["wave"][st.speed_index] * 100)
+    check("apply_to(wave): type/wavelength/mode/centre",
+          (pkts[1][2], pkts[1][5], pkts[1][6], pkts[1][7], pkts[1][8]),
+          (4, 0, 50, 8, 1))
+    check("apply_to(wave): medium speed + direction right",
+          (pkts[1][3] | (pkts[1][4] << 8), pkts[1][9]), (sp, 1))
+    check("apply_to(wave): rainbow stream balls", pkts[1][10:38],
+          ball_bytes(effects.RAINBOW_STREAM))
+
+    # wave customized: user colour list, part-screen mode 0
+    st = prof.LightingState(effect="wave", color_mode="customized",
+                            colors=["FF5050", "50FF50"], speed_index=2)
+    pkts = run(kb, st.apply_to, kb)
+    check("apply_to(wave custom): mode 0, user colours spread",
+          (pkts[1][2], pkts[1][8],
+           [pkts[1][10], pkts[1][14], pkts[1][18]]), (4, 0, [0, 50, 100]))
+    check("apply_to(wave custom): fast speed",
+          pkts[1][3] | (pkts[1][4] << 8),
+          int(effects.SPEED_TABLE["wave"][2] * 100))
+    check("apply_to(wave custom): colour wrap at 100",
+          pkts[1][19:22], bytes([0xFF, 0x50, 0x50]))
+
+    # Wheel — MSI type 6; rainbow wavelength 5 / custom 3; black-in/out balls.
+    st = prof.LightingState(effect="wheel", color_mode="rainbow")
+    pkts = run(kb, st.apply_to, kb)
+    check("apply_to(wheel rainbow): type 6, wl 5, mode 1, CW dir 0",
+          (pkts[1][2], pkts[1][7], pkts[1][8], pkts[1][9]), (6, 5, 1, 0))
+
+    st = prof.LightingState(effect="wheel", color_mode="customized",
+                            colors=["FF0000", "FFFF00", "00FFFF"],
+                            direction=effects.DIR_CCW)
+    pkts = run(kb, st.apply_to, kb)
+    check("apply_to(wheel custom): wl 3, mode 0, CCW dir 1",
+          (pkts[1][7], pkts[1][8], pkts[1][9]), (3, 0, 1))
+    check("apply_to(wheel custom): black-in, 3 colours, black-out",
+          ball_bytes([tuple(pkts[1][10 + i * 4:14 + i * 4])
+                      for i in range(5)]),
+          ball_bytes(effects.balls_wheel(["FF0000", "FFFF00", "00FFFF"])))
+
+    # Bouncy ball — MSI type 7, fixed 1.0 s speed; rainbow wl 2 / custom wl 3.
+    st = prof.LightingState(effect="bouncy", color_mode="rainbow")
+    pkts = run(kb, st.apply_to, kb)
+    check("apply_to(bouncy rainbow): type 7, wl 2, mode 1, speed 100",
+          (pkts[1][2], pkts[1][7], pkts[1][8],
+           pkts[1][3] | (pkts[1][4] << 8)), (7, 2, 1, 100))
+
+    st = prof.LightingState(effect="bouncy", color_mode="customized",
+                            colors=["12C0FF"])
+    pkts = run(kb, st.apply_to, kb)
+    check("apply_to(bouncy custom): wl 3, mode 0",
+          (pkts[1][7], pkts[1][8]), (3, 0))
+    check("apply_to(bouncy custom): black/colour/black balls",
+          pkts[1][10:22],
+          bytes([0, 0, 0, 0, 50, 0x12, 0xC0, 0xFF, 100, 0, 0, 0]))
+
+    # Cycle customized: MSI spread colours (100//n) + wrap.
+    st = prof.LightingState(effect="cycle", color_mode="customized",
+                            colors=["FF0000", "00FF00", "0000FF"])
+    pkts = run(kb, st.apply_to, kb)
+    check("apply_to(cycle custom): type 3, legacy header kept",
+          (pkts[1][2], pkts[1][7], pkts[1][8]), (3, 50, 0x08))
+    check("apply_to(cycle custom): ball positions 0/33/66/100",
+          [pkts[1][10 + i * 4] for i in range(4)], [0, 33, 66, 100])
+
+    # Steady/Breath Rainbow radio: 9 hue groups, one packet per zone.
+    st = prof.LightingState(effect="steady", color_mode="rainbow")
+    pkts = run(kb, st.apply_to, kb)
+    check("apply_to(steady rainbow): mask+effect per zone",
+          len(pkts), NUM_ZONES * 2)
+    check("steady rainbow: zone 0 = red group, solid 2-ball list",
+          (pkts[0][2], pkts[1][2], pkts[1][11:14], pkts[1][15:18]),
+          (0x01, 1, bytes([0xFF, 0, 0]), bytes([0xFF, 0, 0])))
+    check("steady rainbow: zone 4 = cyan-green group",
+          (pkts[22][2], pkts[23][11:14]), (0x10, bytes([0x00, 0xFF, 0x80])))
+    check("steady rainbow: zone 9 = pink group (mask 0x200)",
+          (pkts[40][2] | (pkts[40][3] << 8), pkts[41][11:14]),
+          (0x200, bytes([0xFF, 0x00, 0x80])))
+
+    # Dance — MSI clears all zones first, then sends type 5.
+    st = prof.LightingState(effect="dance", speed_index=2)
+    pkts = run(kb, st.apply_to, kb)
+    want_all = bytes([0x02, 0x01, 0xFF, 0xFF, 0xFF, 0x00])
+    check("dance: whole-board mask before clear and after",
+          (pkts[0][:6], pkts[2][:6]), (want_all, want_all))
+    check("dance: zone-clear packet is an empty off",
+          pkts[1][2:10], bytes(8))
+    check("dance: type 5, fast speed 100",
+          (pkts[3][2], pkts[3][3] | (pkts[3][4] << 8)), (5, 100))
+
+    # Customize mode — one mask+packet pair per styled zone, MSI palette.
+    st = prof.LightingState(effect="custom", zone_styles={
+        "0": {"effect": "steady", "colors": ["FF0000"]},
+        "5": {"effect": "breath", "colors": ["00FF00"], "speed_index": 2},
+        "9": {"effect": "wave", "colors": ["0000FF"], "speed_index": 1,
+              "direction": effects.DIR_LEFT},
+        "12": {"effect": "off"},
+    })
+    pkts = run(kb, st.apply_to, kb)
+    check("customize: one mask+packet pair per styled zone", len(pkts), 8)
+    check("customize: zone 0 steady red",
+          (pkts[0][:6], pkts[1][2], pkts[1][11:14]),
+          (bytes([0x02, 0x01, 0x01, 0, 0, 0]), 1, bytes([0xFF, 0, 0])))
+    check("customize: zone 5 breath green, fast (400)",
+          (pkts[2][2], pkts[3][2], pkts[3][3] | (pkts[3][4] << 8)),
+          (0x20, 2, 400))
+    check("customize: zone 9 wave blue, left (wl 8, mode 0, dir 0)",
+          (pkts[4][2] | (pkts[4][3] << 8), pkts[5][2], pkts[5][7:10]),
+          (0x0200, 4, bytes([8, 0, 0])))
+    check("customize: zone 12 off (mask 0x1000)",
+          (pkts[6][2] | (pkts[6][3] << 8), pkts[7][2]), (0x1000, 0))
+
+    # All-sync trio.
+    pkts = run(kb, kb.allsync_begin)
+    check("all-sync begin [2,3]", pkts[0][1:3], bytes([0x02, 0x03]))
+    pkts = run(kb, kb.allsync_rgb, 10, 20, 30)
+    check("all-sync rgb [2,4,r,g,b]",
+          pkts[0][1:6], bytes([0x02, 0x04, 10, 20, 30]))
+    pkts = run(kb, kb.allsync_rainbow)
+    check("all-sync rainbow: wave wl 10, mode 1, 16% stream",
+          (len(pkts), pkts[1][2], pkts[1][7], pkts[1][8], pkts[1][9],
+           pkts[1][14]), (2, 4, 10, 1, 1, 16))
+
+    # MCU memory commands.
+    check("save to MCU [2,160]",
+          run(kb, kb.mcu_save)[0][1:3], bytes([0x02, 160]))
+    check("revert to MCU save [2,176]",
+          run(kb, kb.mcu_cancel)[0][1:3], bytes([0x02, 176]))
+    check("MCU reset [2,255]",
+          run(kb, kb.mcu_reset)[0][1:3], bytes([0x02, 255]))
+
+    # Firmware version + language ride report 1 (ack channel).
+    pkts = run(kb, kb.firmware_version)
+    check("firmware query → report 1 [145,1]",
+          pkts[0][:3], bytes([0x01, 145, 1]))
+    check("language query → report 1 [160]",
+          run(kb, kb.language)[0][:2], bytes([0x01, 160]))
+    check("language() defaults to US without a reply", kb.language(), "US")
+
+    # Off via the profile layer = black steady (works on all firmware).
+    st = prof.LightingState(effect="off")
+    pkts = run(kb, st.apply_to, kb)
+    check("apply_to(off): whole-board mask + steady-black packet",
+          (pkts[0][2], pkts[1][2], pkts[1][11:14]),
+          (0xFF, 1, bytes(3)))
+
+    # packet builder refuses more balls than the wire fits
+    try:
+        kb.msi_effect(0, [(i, 0, 0, 0) for i in range(14)])
+        check("msi_effect rejects >13 colour balls", False, True)
+    except ValueError:
+        check("msi_effect rejects >13 colour balls", True, True)
+
+    # new state fields survive a save/load round trip
+    st = prof.LightingState(
+        effect="wheel", color_mode="rainbow", colors=["FF0000", "FFFF00"],
+        speed_index=2, direction=effects.DIR_CCW,
+        zone_styles={"3": {"effect": "breath", "colors": ["00FF00"],
+                           "speed_index": 0}})
+    prof.save_state(st)
+    st2 = prof.load_state()
+    check("state round trip: colour list / mode / speed / direction",
+          (st2.colors, st2.color_mode, st2.speed_index, st2.direction),
+          (["FF0000", "FFFF00"], "rainbow", 2, effects.DIR_CCW))
+    check("state round trip: per-zone styles",
+          st2.zone_styles,
+          {"3": {"effect": "breath", "colors": ["00FF00"], "speed_index": 0}})
 
     print("\n" + ("ALL CHECKS PASSED ✓" if ok else "FAILURES ✗"))
     return 0 if ok else 1

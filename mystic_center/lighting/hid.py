@@ -131,14 +131,16 @@ class MysticHid:
         except Exception:
             pass
 
-    def send_feature(self, payload: bytes) -> bool:
-        """Send a 64-byte SET_FEATURE with report id REPORT_ID_CMD.
+    def send_feature(self, payload: bytes, report_id: int = REPORT_ID_CMD) -> bool:
+        """Send a 64-byte SET_FEATURE with the given report id.
 
-        `payload` holds the 63 bytes AFTER the report id.
+        `payload` holds the 63 bytes AFTER the report id.  MSI Center uses
+        report 2 for commands; report 1 carries the query payloads for the
+        firmware-version / language reads.
         Returns True on success.
         """
         self.ensure_open()
-        buf = bytes([REPORT_ID_CMD]) + bytes(payload).ljust(REPORT_LEN - 1, b"\x00")
+        buf = bytes([report_id]) + bytes(payload).ljust(REPORT_LEN - 1, b"\x00")
         result = fcntl_result = None
         import fcntl  # local import keeps module importable on other OSes
 

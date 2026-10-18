@@ -69,7 +69,10 @@ mystic-center battery --end 80 --start 60
 mystic-center webcam off             # WiFi-cam privacy toggle
 mystic-center fn-swap right          # Fn on the right side
 mystic-center calibrate              # raw EC mode-code exploration (safe)
-mystic-center lighting steady FF7F20 # the full legacy lighting CLI
+mystic-center lighting steady FF7F20 # the full lighting CLI
+mystic-center lighting wave --rainbow --dir right --speed medium
+mystic-center lighting custom-set 0-7 steady --colors FF0000
+mystic-center lighting save        # persist current lighting on the keyboard
 mystic-center                        # GUI
 ```
 
@@ -119,6 +122,6 @@ mystic-center                        # GUI
 | Fan modes (auto/silent) | ✅ firmware-managed, via msi-ec |
 | Custom fan curves | 🟦 implemented — MSI-Center parity via `msi_wmi_platform` (WMI2 tables); semantics verified against kernel patch + decompiled MSI Center; **live hardware probe pending**, run `sudo tools/wmi2_probe.py --write-test` after installing |
 | Battery charge-limit sliders | ✅ kernel interface; values verified |
-| 24-zone RGB keyboard | ✅ fully verified (incl. software wave) |
+| 24-zone RGB keyboard | ✅ verified core — 🟦 full MSI-Center parity set (wave, dance, wheel, bouncy ball, Customize, all-sync, Save/Revert to MCU) implemented, packet-level tests passing; live check of the new effects pending |
 | Webcam / Fn-side swap | ✅ via msi-ec |
 | Autostart + packaging | ✅ systemd service + .desktop |
