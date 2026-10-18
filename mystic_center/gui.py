@@ -173,7 +173,7 @@ class OverviewPage(Page):
 
         g_temp = Adw.PreferencesGroup(title="Temperatures")
         self.col.append(g_temp)
-        for t in ("CPU", "GPU", "NVMe"):
+        for t in ("CPU", "GPU"):
             add_temp_row(t, g_temp)
 
         g_fan = Adw.PreferencesGroup(title="Fans")
@@ -262,7 +262,6 @@ class OverviewPage(Page):
 
         setbar("CPU", cpu.get("temp"))
         setbar("GPU", gpu.get("temp"))
-        setbar("NVMe", temps.get("nvme"))
 
         def meter(bar, label, data):
             if not data:
@@ -633,33 +632,62 @@ KB_ROWS: list[list[list[str]]] = [
      ["Ctrl", "←"], ["↓", "→", "0", "."]],
 ]
 
-EFFECT_ORDER = ["steady", "breath", "cycle", "wave", "swave", "scycle", "off"]
+EFFECT_ORDER = ["steady", "breath", "rbreath", "cycle", "wave", "rain",
+                "fire", "radar", "lightning", "gaming", "off"]
 EFFECT_NAMES = {
     "steady": "Steady",
     "breath": "Breathing",
+    "rbreath": "Rainbow Breath",
     "cycle": "Colorful Cycle",
     "wave": "Wave",
-    "swave": "Rainbow Wave 24",
-    "scycle": "Colorful Wave 24",
+    "rain": "Rain",
+    "fire": "Fire",
+    "radar": "Radar",
+    "lightning": "Lightning",
+    "gaming": "Gaming",
     "off": "Off",
 }
 
-# tuning rows shown per effect
+# tuning rows shown per effect ("color" = color picker + palette row)
 TUNING = {
     "steady": ("color",),
     "breath": ("color", "speed", "level"),
+    "rbreath": ("speed",),
     "cycle": ("speed", "level"),
-    "wave": ("speed", "direction", "level"),
-    "swave": ("speed", "direction"),
-    "scycle": ("speed",),
+    "wave": ("speed", "direction"),
+    "rain": ("speed",),
+    "fire": ("speed",),
+    "radar": ("speed", "direction"),
+    "lightning": ("speed",),
+    "gaming": (),
     "off": (),
 }
 
-LIGHT_KEY_CSS = ".light-key { font-size: 7px; padding: 1px 2px; " \
-    "min-width: 0; min-height: 24px; border-radius: 4px;\n" \
-    "  border: 1px solid rgba(0,0,0,0.45); }\n" \
-    ".light-key.sel { border: 2px solid #9cc7ff; }\n" \
-    ".effect-tile { font-size: 9px; }"
+SPEED_TITLES = {
+    "steady": "Cycle length (seconds)",
+    "breath": "Cycle length (seconds)",
+    "rbreath": "Cycle length (seconds)",
+    "cycle": "Cycle length (seconds)",
+    "wave": "Hue drift period (seconds)",
+    "rain": "Activity (6 = natural)",
+    "fire": "Flicker speed (6 = natural)",
+    "radar": "Sweep period (seconds)",
+    "lightning": "Storm power (6 = natural)",
+}
+
+# effects rendered by the software 24-zone daemon (animate.py engines)
+SOFTWARE = {"wave", "swave", "scycle", "spulse", "rbreath", "rain",
+            "fire", "radar", "lightning"}
+
+LIGHT_KEY_CSS = ".light-key { font-size: 8px; padding: 2px 4px; " \
+    "min-width: 0; min-height: 27px; border-radius: 5px;\n" \
+    "  border: 1px solid rgba(0,0,0,0.45); box-shadow: inset 0 -6px 8px -4px rgba(0,0,0,0.35); }\n" \
+    ".light-key.sel { border: 2px solid #9cc7ff; box-shadow: 0 0 7px 1px rgba(120,180,255,0.55); }\n" \
+    ".kb-card { background: rgba(127,127,127,0.08); border-radius: 14px;\n" \
+    "  border: 1px solid rgba(127,127,127,0.16); }\n" \
+    ".effect-tile { border-radius: 12px; padding-left: 8px; padding-right: 8px; }\n" \
+    ".effect-tile.active { border: 2px solid #3584e4;\n" \
+    "  background: rgba(53,132,228,0.14); }"
 
 
 class KeyboardLayout(Gtk.Box):
@@ -718,12 +746,11 @@ class EffectTile(Gtk.Button):
 
 
 class LightingPage(Page):
-    """Lighting: MSI-Center-style tiles + physical 24-zone keyboard layout."""
+    """Premium lighting: the keyboard reference is fixed on top, and all
+    functions (effect tiles, tuning, apply, profiles) scroll below."""
 
     def __init__(self, window):
         super().__init__(window, "preferences-color-symbolic")
-        self.clamp.set_maximum_size(1160)
-
         self.selected: set[int] = set()
         self.preview_colors: list[str] = ["16161C"] * NUM_ZONES
         self._preview_active = False
@@ -731,6 +758,8 @@ class LightingPage(Page):
         self._sweep_i = -1
         self._sweep_backup: list[str] | None = None
         self.state = prof.load_state()
+        if self.state.effect == "swave":  # legacy name → MSI-style wave
+            self.state.effect = "wave"
         if self.state.effect not in EFFECT_ORDER:
             self.state.effect = "steady"
 
@@ -738,26 +767,23 @@ class LightingPage(Page):
         self.refresh_status()
         self.sync_preview_from_state()
         self.connect("map", lambda *_a: self.refresh_status())
-        if self.state.effect in ("swave", "scycle", "spulse"):
-            from .lighting import daemon as daemon_ctl
-            if daemon_ctl.running():
-                from .lighting.animate import get_engine
-                self._preview_engine = get_engine(
-                    self.state.effect, speed=self.state.speed,
-                    direction=self.state.direction)
-                self._preview_t0 = GLib.get_monotonic_time() / 1e6
-                self._start_preview_timer()
 
     # ------------------------------------------------------------------ UI build
 
     def build_ui(self) -> None:
-        main = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        self.clamp.set_child(main)
+        main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        main.set_margin_top(10)
+        main.set_margin_start(12)
+        main.set_margin_end(12)
+        main.set_margin_bottom(10)
+        self.set_child(main)  # replaces the base clamp: split layout below
+        self.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.NEVER)
 
-        # left column — keyboard reference + status ------------------------------
-        left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        left.set_size_request(470, -1)
-        main.append(left)
+        # ---- top half: status + keyboard reference (fixed) -----------------
+        upper = Adw.Clamp(maximum_size=1180, tightening_threshold=940)
+        upper_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        upper.set_child(upper_box)
+        main.append(upper)
 
         status_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.status_icon = Gtk.Label(label="●")
@@ -767,56 +793,70 @@ class LightingPage(Page):
         self.status_label.add_css_class("dim-label")
         status_row.append(self.status_icon)
         status_row.append(self.status_label)
-        left.append(status_row)
+        upper_box.append(status_row)
 
-        hint = Gtk.Label(
-            label="Physical keyboard — click keys to pick zones, "
-                  "colors preview live")
-        hint.set_xalign(0.0)
-        hint.add_css_class("heading")
-        left.append(hint)
-
+        card = Adw.Bin()
+        card.add_css_class("kb-card")
+        holder = Gtk.Box()
+        holder.set_halign(Gtk.Align.CENTER)
+        holder.set_margin_top(10)
+        holder.set_margin_bottom(10)
+        holder.set_margin_start(10)
+        holder.set_margin_end(10)
         self.kb_layout = KeyboardLayout(self)
-        left.append(self.kb_layout)
+        holder.append(self.kb_layout)
+        card.set_child(holder)
+        upper_box.append(card)
 
+        lg_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        lg_row.set_halign(Gtk.Align.CENTER)
         sel_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         for label, handler in [("Select all", self.on_select_all),
                                ("Clear", self.on_clear_selection)]:
             b = Gtk.Button(label=label)
+            b.add_css_class("flat")
             b.connect("clicked", handler)
             sel_row.append(b)
-        sel_sub = Gtk.Label(label="(approximate column boundaries)")
-        sel_sub.add_css_class("caption")
-        sel_sub.add_css_class("dim-label")
-        sel_row.append(sel_sub)
-        left.append(sel_row)
-
-        scan_l = Gtk.Label(label="Zone scan (identify):")
-        scan_l.add_css_class("caption")
-        scan_l.add_css_class("dim-label")
-        self.sweep_btn = Gtk.Button(label="Run")
+        lg_row.append(sel_row)
+        self.sweep_btn = Gtk.Button(label="Zone scan (identify)")
         self.sweep_btn.set_tooltip_text(
             "Lights zones one by one so you can map LEDs to the table")
+        self.sweep_btn.add_css_class("flat")
         self.sweep_btn.connect("clicked", self.on_sweep)
-        scan_l.set_valign(Gtk.Align.END)
-        scan_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        scan_row.append(scan_l)
-        scan_row.append(self.sweep_btn)
-        left.append(scan_row)
+        lg_row.append(self.sweep_btn)
+        note = Gtk.Label(
+            label="zones approximate — run the scan to verify")
+        note.add_css_class("caption")
+        note.add_css_class("dim-label")
+        lg_row.append(note)
+        upper_box.append(lg_row)
 
-        # right column — effect tiles + tuning -----------------------------------
-        right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        right.set_hexpand(True)
-        main.append(right)
+        # ---- bottom half: scrolling functions ------------------------------
+        bottom = Gtk.ScrolledWindow()
+        bottom.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        bottom.set_vexpand(True)
+        bottom_clamp = Adw.Clamp(maximum_size=1180, tightening_threshold=940)
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        col.set_margin_top(4)
+        col.set_margin_bottom(24)
+        col.set_margin_start(6)
+        col.set_margin_end(6)
+        bottom_clamp.set_child(col)
+        bottom.set_child(bottom_clamp)
+        main.append(bottom)
 
-        g_tiles = Adw.PreferencesGroup(title="Effect")
-        right.append(g_tiles)
+        # Effects ------------------------------------------------------------ 
+        g_tiles = Adw.PreferencesGroup(
+            title="Effects",
+            description="Pick a look — its tuning appears underneath.")
+        col.append(g_tiles)
         flow = Gtk.FlowBox()
         flow.set_selection_mode(Gtk.SelectionMode.NONE)
-        flow.set_min_children_per_line(4)
-        flow.set_max_children_per_line(4)
-        flow.set_row_spacing(6)
-        flow.set_column_spacing(6)
+        flow.set_min_children_per_line(6)
+        flow.set_max_children_per_line(6)
+        flow.set_row_spacing(8)
+        flow.set_column_spacing(8)
+        flow.set_halign(Gtk.Align.CENTER)
         self.tiles: dict[str, EffectTile] = {}
         for key in EFFECT_ORDER:
             tile = EffectTile(key, self)
@@ -824,15 +864,17 @@ class LightingPage(Page):
             flow.append(tile)
         g_tiles.add(flow)
 
-        group1 = Adw.PreferencesGroup(title="Tuning")
-        right.append(group1)
+        # Tuning -------------------------------------------------------------
+        self.tuning_group = Adw.PreferencesGroup(
+            title=f"Tuning · {EFFECT_NAMES[self.state.effect]}")
+        col.append(self.tuning_group)
 
         color_row = Adw.ActionRow(title="Color")
         self.color_btn = Gtk.ColorDialogButton()
         self.color_btn.set_dialog(Gtk.ColorDialog())
         self.color_btn.set_rgba(self._rgba(self.state.color))
         color_row.add_prefix(self.color_btn)
-        group1.add(color_row)
+        self.tuning_group.add(color_row)
         self.color_row = color_row
 
         palette = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
@@ -846,57 +888,62 @@ class LightingPage(Page):
                 b.connect("clicked", self.on_swatch, hexstr)
                 h.append(b)
             palette.append(h)
-        group1.add(palette)
+        self.tuning_group.add(palette)
         self.palette_box = palette
 
         self.speed_row = Adw.SpinRow.new_with_range(3.0, 12.0, 0.5)
-        self.speed_row.set_title("Cycle length (seconds)")
+        self.speed_row.set_title(SPEED_TITLES.get(self.state.effect,
+                                                  "Cycle length (seconds)"))
         self.speed_row.set_value(self.state.speed)
-        group1.add(self.speed_row)
+        self.tuning_group.add(self.speed_row)
 
         self.dir_row = Adw.SwitchRow(title="Wave direction: left → right",
                                      subtitle="Off = right → left")
         self.dir_row.set_active(self.state.direction == 1)
-        group1.add(self.dir_row)
+        self.tuning_group.add(self.dir_row)
 
         self.level_row = Adw.SpinRow.new_with_range(0, 100, 5)
         self.level_row.set_title("Brightness (level byte)")
         self.level_row.set_value(self.state.level)
-        group1.add(self.level_row)
+        self.tuning_group.add(self.level_row)
 
         self.apply_btn_row = Adw.SwitchRow(
             title="Apply to whole keyboard",
             subtitle="Off = only the selected zones change (Steady only)")
         self.apply_btn_row.set_active(True)
-        group1.add(self.apply_btn_row)
+        self.tuning_group.add(self.apply_btn_row)
 
-        group2 = Adw.PreferencesGroup(title="Apply")
-        right.append(group2)
-
+        # Apply --------------------------------------------------------------
+        g_apply = Adw.PreferencesGroup(title="Apply")
+        col.append(g_apply)
         actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        actions.set_halign(Gtk.Align.CENTER)
         self.apply_btn = Gtk.Button(label="Apply")
         self.apply_btn.add_css_class("pill")
         self.apply_btn.add_css_class("suggested-action")
         self.apply_btn.connect("clicked", self.on_apply)
         off_btn = Gtk.Button(label="Turn Off")
+        off_btn.add_css_class("pill")
         off_btn.connect("clicked", self.on_off)
         actions.append(self.apply_btn)
         actions.append(off_btn)
-        group2.add(actions)
+        g_apply.add(actions)
 
         self.autostart_row = Adw.SwitchRow(
             title="Apply this look at login",
-            subtitle="Installs an autostart entry that re-runs `mystic-center lighting apply`",
+            subtitle="Installs an autostart entry that re-runs "
+                     "`mystic-center lighting apply`",
         )
         self.autostart_row.set_active(self.autostart_installed())
         self.autostart_row.connect("notify::active", self.on_autostart_toggled)
-        group2.add(self.autostart_row)
+        g_apply.add(self.autostart_row)
 
+        # Profiles -----------------------------------------------------------
         group3 = Adw.PreferencesGroup(
             title="Profiles",
             description="Your saved looks — nothing is predefined. "
                         "Use 'Save current as…' to create one.")
-        right.append(group3)
+        col.append(group3)
 
         self.profile_names: list[str] = []
         self.profile_row = Adw.ComboRow(title="Profile")
@@ -904,6 +951,7 @@ class LightingPage(Page):
         self.refresh_profiles()
 
         prof_btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        prof_btns.set_halign(Gtk.Align.CENTER)
         for label, handler in [("Apply selected", self.on_apply_profile),
                                ("Save current as…", self.on_save_profile),
                                ("Delete", self.on_delete_profile)]:
@@ -950,15 +998,23 @@ class LightingPage(Page):
         self.provider.load_from_string("\n".join(css))
 
     def _sync_effect_ui(self) -> None:
-        """Show only the tuning rows relevant to the selected effect."""
+        """Selected-tile ring, dynamic titles, and relevant tuning rows."""
         eff = self.state.effect
         show = set(TUNING.get(eff, ()))
-        self.color_row.set_visible("color" in show or eff == "steady")
+        self.color_row.set_visible("color" in show)
         self.palette_box.set_visible("color" in show)
         self.speed_row.set_visible("speed" in show)
+        self.speed_row.set_title(SPEED_TITLES.get(eff, "Cycle length (seconds)"))
         self.dir_row.set_visible("direction" in show)
         self.level_row.set_visible("level" in show)
+        self.level_row.set_title("Brightness (level byte)")
         self.apply_btn_row.set_visible(eff == "steady")
+        self.tuning_group.set_title(f"Tuning · {EFFECT_NAMES[eff]}")
+        for key, tile in self.tiles.items():
+            if key == eff:
+                tile.add_css_class("active")
+            else:
+                tile.remove_css_class("active")
 
     def refresh_profiles(self) -> None:
         self.user_profiles = prof.load_profiles()
@@ -988,22 +1044,37 @@ class LightingPage(Page):
             self.status_icon.add_css_class("error")
             self.status_label.set_label(f"{node}: {e}")
 
-    def sync_preview_from_state(self) -> None:
+    def _sample_preview_colors(self) -> list[str]:
+        """Representative frame for the current effect (static snapshot)."""
         st = self.state
-        if st.effect in ("cycle", "wave", "swave", "scycle"):
-            self.preview_colors = gradient(NUM_ZONES)
-        elif st.effect == "breath":
+        eff = st.effect
+        if eff == "steady":
+            return [st.zone_colors.get(str(z), st.color).lstrip("#")
+                    for z in range(NUM_ZONES)]
+        if eff == "off":
+            return ["16161C"] * NUM_ZONES
+        if eff == "breath":
             r, g, b = hex_to_rgb(st.color)
-            self.preview_colors = [
-                rgb_to_hex(max(r // 2, 1), max(g // 2, 1), max(b // 2, 1))
-            ] * NUM_ZONES
-        elif st.effect == "off":
-            self.preview_colors = ["16161C"] * NUM_ZONES
-        else:  # steady
-            self.preview_colors = [
-                st.zone_colors.get(str(z), st.color).lstrip("#")
-                for z in range(NUM_ZONES)
-            ]
+            return [rgb_to_hex(max(r // 2, 1), max(g // 2, 1), max(b // 2, 1))
+                    ] * NUM_ZONES
+        if eff == "gaming":
+            base = [GAMING_BASE.lstrip("#")] * NUM_ZONES
+            for z in GAMING_RED_ZONES:
+                base[z] = GAMING_RED.lstrip("#")
+            return base
+        # software engine sample at a mid-animation instant
+        from .lighting import animate
+        eng = animate.get_engine(eff, speed=st.speed, direction=st.direction)
+        if isinstance(eng, (animate.Rain, animate.Lightning)):
+            t = 0.0
+            for _ in range(7):  # let the state build up a few events
+                eng.colors(t)
+                t += 0.22
+            return [c.lstrip("#") for c in eng.colors(t)]
+        return [c.lstrip("#") for c in eng.colors(max(0.25, st.speed * 0.31))]
+
+    def sync_preview_from_state(self) -> None:
+        self.preview_colors = self._sample_preview_colors()
         for zone in range(NUM_ZONES):
             self.kb_layout.set_zone_selected(zone, zone in self.selected)
         self.style_full()
@@ -1015,8 +1086,7 @@ class LightingPage(Page):
             self.selected.discard(zone)
         else:
             self.selected.add(zone)
-        for z in (zone,):
-            self.kb_layout.set_zone_selected(z, z in self.selected)
+        self.kb_layout.set_zone_selected(zone, zone in self.selected)
 
     def on_effect_tile(self, tile: EffectTile) -> None:
         self.state.effect = tile.effect_key
@@ -1054,18 +1124,21 @@ class LightingPage(Page):
     def on_apply(self, *_a) -> None:
         self._collect_state()
         state = self.state
-        if state.effect in ("swave", "scycle", "spulse"):
-            from .lighting import daemon as daemon_ctl
-            from .lighting.animate import get_engine
+        from .lighting import daemon as daemon_ctl
+
+        if state.effect in SOFTWARE:
+            daemon_ctl.stop()
             try:
-                daemon_ctl.stop()
-                daemon_ctl.start_detached(state.effect, state.speed, state.direction)
+                daemon_ctl.start_detached(state.effect, state.speed,
+                                          state.direction)
             except Exception as e:
                 self.window.toast(f"renderer failed: {e}")
                 return
             prof.save_state(state)
+            self._stop_preview_timer()
             self._preview_engine = None
             try:
+                from .lighting.animate import get_engine
                 self._preview_engine = get_engine(
                     state.effect, speed=state.speed, direction=state.direction)
             except KeyError:
@@ -1079,7 +1152,6 @@ class LightingPage(Page):
         kb = self._current_machine()
         if kb is None:
             return
-        from .lighting import daemon as daemon_ctl
         daemon_ctl.stop()
         self._stop_preview_timer()
         try:
@@ -1092,7 +1164,7 @@ class LightingPage(Page):
                         state.zone_colors[str(z)] = state.color.lstrip("#")
                 state.apply_to(kb, zone_target=target)
             else:
-                state.apply_to(kb)
+                state.apply_to(kb)  # breath/cycle hardware, gaming static, off
         except Exception as e:
             self.window.toast(f"apply failed: {e}")
             return
@@ -1128,7 +1200,8 @@ class LightingPage(Page):
 
     def _start_preview_timer(self) -> None:
         self._preview_active = True
-        self._preview_t0 = getattr(self, "_preview_t0", GLib.get_monotonic_time() / 1e6)
+        self._preview_t0 = getattr(self, "_preview_t0",
+                                   GLib.get_monotonic_time() / 1e6)
         if not getattr(self, "_preview_timer", None):
             self._preview_timer = GLib.timeout_add(120, self._preview_tick)
 
@@ -1203,13 +1276,12 @@ class LightingPage(Page):
         if st is None:
             self.window.toast(f"profile '{name}' is broken — delete it")
             return
+        if st.effect == "swave":  # legacy name → MSI-style wave
+            st.effect = "wave"
 
-        from .lighting import daemon as daemon_ctl
-        if st.effect in ("swave", "scycle", "spulse"):
-            kb = self._current_machine()
-            if kb is None:
-                return
-            st.apply_to(kb)
+        if st.effect in SOFTWARE:
+            st.apply_to(None)  # daemon path — the child opens the device itself
+            self._stop_preview_timer()
             self._preview_engine = None
             try:
                 from .lighting.animate import get_engine
@@ -1220,12 +1292,11 @@ class LightingPage(Page):
             self._preview_t0 = GLib.get_monotonic_time() / 1e6
             self._start_preview_timer()
         else:
-            daemon_ctl.stop()
-            self._stop_preview_timer()
             kb = self._current_machine()
             if kb is None:
                 return
             st.apply_to(kb)
+            self._stop_preview_timer()
         prof.save_state(st)
         self.state = st
         self.sync_preview_from_state()

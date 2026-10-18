@@ -103,7 +103,9 @@ def main(argv=None) -> int:
     add("test-out", "cycle each zone via output reports (out-path test)")
     add("test-zones", "zone order testboard: 24 rainbow colors at once")
     sp = add("daemon", "run a software animation in the foreground (debug)")
-    sp.add_argument("engine", choices=["swave", "scycle", "spulse"])
+    sp.add_argument("engine", choices=["wave", "swave", "scycle", "spulse",
+                                       "rbreath", "rain", "fire", "radar",
+                                       "lightning"])
     sp.add_argument("--speed", type=float, default=6.0)
     sp.add_argument("--dir", type=int, default=1)
     sp.add_argument("--fps", type=int, default=12)
@@ -290,16 +292,14 @@ def main(argv=None) -> int:
             print(f"saved profile '{args.name}'")
             return 0
         if args.action == "list":
-            names = sorted(set(prof.builtins()) | set(prof.load_profiles()))
-            user = set(prof.load_profiles())
-            for n in names:
-                print(f"{'*' if n in user else ' '} {n}")
+            for n in sorted(prof.load_profiles()):
+                print(n)
             return 0
         if args.action == "apply":
             if not args.name:
                 print("usage: profile apply NAME", file=sys.stderr)
                 return 2
-            st = prof.get_profile(args.name) or _preset(args.name)
+            st = prof.get_profile(args.name)
             if st is None:
                 print(f"profile '{args.name}' not found", file=sys.stderr)
                 return 1
@@ -318,10 +318,8 @@ def main(argv=None) -> int:
 
 
 def _preset(name: str) -> prof.LightingState | None:
-    data = prof.builtins().get(name)
-    if data is None:
-        return None
-    return prof.LightingState(**data)
+    """Legacy convenience: preset lookup removed with the built-in list."""
+    return None
 
 
 if __name__ == "__main__":

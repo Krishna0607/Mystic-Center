@@ -17,6 +17,12 @@ CONFIG_DIR = os.path.join(
 STATE_PATH = os.path.join(CONFIG_DIR, "state.json")
 PROFILES_PATH = os.path.join(CONFIG_DIR, "profiles.json")
 
+# "Gaming" highlight: WASD + arrow-key zones flash red over a dim board
+# (zone index = row*4 + column; W lives in zone 8, A/S/D in 12, arrows 22/23)
+GAMING_RED_ZONES = (8, 12, 22, 23)
+GAMING_RED = "#FF2030"
+GAMING_BASE = "#26262B"
+
 
 @dataclass
 class LightingState:
@@ -31,7 +37,9 @@ class LightingState:
 
     def validate(self) -> None:
         if self.effect not in {"off", "steady", "breath", "cycle", "wave",
-                               "swave", "scycle", "spulse"}:
+                               "swave", "scycle", "spulse", "rbreath",
+                               "rain", "fire", "radar", "lightning",
+                               "gaming"}:
             raise ValueError(f"bad effect: {self.effect}")
         if self.direction not in (0, 1):
             raise ValueError("direction must be 0 or 1")
@@ -43,17 +51,30 @@ class LightingState:
 
     def apply_to(self, kb: MysticKeyboard, zone_target: list[int] | None = None) -> None:
         self.validate()
-        kb.direction = self.direction
-        kb.level = self.level
         speed = int(round(self.speed * 100))
         zones = zone_target  # None = all
 
-        if self.effect in ("swave", "scycle", "spulse"):
+        # software engines (animation type written per frame over HID).
+        # "wave" is software now: MSI-style column sweep, since the firmware
+        # wave is coarse. Legacy swave/scycle/spulse keep their old meaning.
+        if self.effect in ("swave", "scycle", "spulse", "rbreath", "rain",
+                           "fire", "radar", "lightning", "wave"):
+            from .animate import is_software
             from .daemon import start_detached, stop
+            assert is_software(self.effect)
             stop()
             start_detached(self.effect, self.speed, self.direction)
             return
 
+        if self.effect == "gaming":
+            colors = {z: GAMING_BASE for z in range(24)}
+            for z in GAMING_RED_ZONES:
+                colors[z] = GAMING_RED
+            kb.steady_zones(colors)
+            return
+
+        kb.direction = self.direction
+        kb.level = self.level
         if self.effect == "off":
             kb.off(zones)
         elif self.effect == "steady":
@@ -70,8 +91,6 @@ class LightingState:
             kb.breath(self.color, zones=zones, speed=speed)
         elif self.effect == "cycle":
             kb.cycle(zones=zones, speed=speed)
-        elif self.effect == "wave":
-            kb.wave(zones=zones, speed=speed, direction=self.direction)
 
 
 # --- JSON storage -----------------------------------------------------------------
@@ -139,36 +158,3 @@ def get_profile(name: str) -> LightingState | None:
         return st
     except (TypeError, ValueError):
         return None
-
-
-# --- built-in presets (merged with user profiles) ----------------------------------
-
-
-def builtins() -> dict[str, dict]:
-    def mk(effect, color, speed=6.0, direction=1, zone_colors=None, level=50):
-        return {
-            "effect": effect,
-            "color": color,
-            "speed": speed,
-            "direction": direction,
-            "level": level,
-            "zone_colors": zone_colors or {},
-        }
-
-    return {
-        "Rainbow Cycle (MSI default)": mk("cycle", "#FFFFFF"),
-        "Rainbow Wave ←→": mk("wave", "#FFFFFF", direction=1),
-        "Rainbow Wave →←": mk("wave", "#FFFFFF", direction=0),
-        "True 24-zone Wave ←→": mk("swave", "#FFFFFF", direction=1),
-        "True 24-zone Wave →←": mk("swave", "#FFFFFF", direction=0),
-        "True 24-zone Cycle": mk("scycle", "#FFFFFF"),
-        "Breathing Red": mk("breath", "#FF2020"),
-        "Breathing Amber": mk("breath", "#FF7F20"),
-        "All Red": mk("steady", "#FF0000"),
-        "All Green": mk("steady", "#00FF00"),
-        "All Blue": mk("steady", "#0070FF"),
-        "All White (low)": mk("steady", "#404040"),
-        "Matrix Green": mk("steady", "#00FF55"),
-        "Cyberpunk Railgun": mk("steady", "#FF2AA0"),
-        "Off": mk("off", "#000000"),
-    }
