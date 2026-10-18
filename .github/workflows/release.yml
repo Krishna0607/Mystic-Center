@@ -20,7 +20,7 @@ jobs:
       image: archlinux:base-devel
     steps:
       - name: Install tooling
-        run: pacman -Sy --noconfirm --needed git curl zstd pacman-contrib
+        run: pacman -Sy --noconfirm --needed git curl zstd pacman-contrib github-cli
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.ref }}
@@ -69,3 +69,14 @@ jobs:
           files: |
             *.pkg.tar.zst
             sha256sums.txt
+      - name: Apply curated release notes if present
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          if [ -f ".github/releases/$tag.md" ]; then
+            gh release edit "$tag" --notes-file ".github/releases/$tag.md"
+            echo "applied curated notes for $tag"
+          else
+            echo "no .github/releases/$tag.md, keeping the default notes"
+          fi
