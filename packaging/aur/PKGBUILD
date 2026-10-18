@@ -1,0 +1,55 @@
+# Maintainer: Krishna Dave <krishna.dave0607@gmail.com>
+pkgname=mystic-center
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="MSI Center replacement for Linux: RGB keyboard control and WMI2 custom fan curves"
+arch=('any')
+url="https://github.com/Krishna0607/Mystic-Center"
+license=('MIT')
+depends=('python' 'python-gobject' 'gtk4' 'libadwaita')
+optdepends=('nvidia-utils: GPU temperature and utilization in the overview')
+install="$pkgname.install"
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('94cf001db9130952bdfd27c5d68ea81a66075fd7e421a3b71cf331d9b2b49a67')
+
+package() {
+  cd "$srcdir/Mystic-Center-$pkgver"
+
+  # Application tree: launcher, python package, docs, tools, license
+  install -d "$pkgdir/usr/lib/$pkgname"
+  cp -a launcher.py mystic_center data docs tools README.md LICENSE \
+    "$pkgdir/usr/lib/$pkgname/"
+
+  # Entry point (GUI + CLI share one binary)
+  printf '%s\n' \
+    '#!/bin/sh' \
+    'export PYTHONPATH="/usr/lib/mystic-center${PYTHONPATH:+:$PYTHONPATH}"' \
+    'exec python3 "/usr/lib/mystic-center/launcher.py" "$@"' \
+    > "$srcdir/mystic-center-bin"
+  install -Dm755 "$srcdir/mystic-center-bin" "$pkgdir/usr/bin/$pkgname"
+
+  # Privileged backend unit; rewrite the user-install prefix to the system one
+  install -Dm644 systemd/mystic-center.service \
+    "$pkgdir/usr/lib/systemd/system/mystic-center.service"
+  sed -i 's|/home/krishna/.local/share/mystic-center|/usr/lib/mystic-center|g' \
+    "$pkgdir/usr/lib/systemd/system/mystic-center.service"
+  grep -q '/usr/lib/mystic-center' \
+    "$pkgdir/usr/lib/systemd/system/mystic-center.service"
+
+  # EC plumbing: ec_sys write support + RGB hidraw access
+  install -Dm644 data/modprobe.d/mystic-center.conf \
+    "$pkgdir/usr/lib/modprobe.d/mystic-center.conf"
+  printf 'ec_sys\n' > "$srcdir/mystic-center-modules-load.conf"
+  install -Dm644 "$srcdir/mystic-center-modules-load.conf" \
+    "$pkgdir/usr/lib/modules-load.d/mystic-center.conf"
+  install -Dm644 data/udev/61-mystic-control.rules \
+    "$pkgdir/usr/lib/udev/rules.d/61-mystic-control.rules"
+
+  # Desktop entry + icon
+  sed 's|Exec=__APP_BIN__|Exec=/usr/bin/mystic-center|' \
+    data/mystic-center.desktop > "$srcdir/mystic-center.desktop"
+  install -Dm644 "$srcdir/mystic-center.desktop" \
+    "$pkgdir/usr/share/applications/mystic-center.desktop"
+  install -Dm644 data/mystic-center-icon.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/mystic-center.svg"
+}

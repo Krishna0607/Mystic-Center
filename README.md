@@ -111,6 +111,33 @@ journalctl -u mystic-center -n 30   # if it is not active
 
 Start the GUI with `mystic-center` (or the **Mystic Center** icon).
 
+### Arch Linux package
+
+A system-wide package is prepared in [`packaging/aur/`](packaging/aur)
+(same result as `install.sh --system`). AUR account registration is
+currently closed upstream, so until the AUR package can be uploaded:
+
+- **Prebuilt package** from the [latest release](https://github.com/Krishna0607/Mystic-Center/releases/latest):
+
+  ```bash
+  curl -LO https://github.com/Krishna0607/Mystic-Center/releases/download/v1.0.0/mystic-center-1.0.0-1-any.pkg.tar.zst
+  sudo pacman -U mystic-center-1.0.0-1-any.pkg.tar.zst
+  ```
+
+- Or **build it yourself** from the included PKGBUILD:
+
+  ```bash
+  git clone https://github.com/Krishna0607/Mystic-Center.git
+  cd Mystic-Center/packaging/aur
+  makepkg -si
+  ```
+
+Both install `/usr/bin/mystic-center`, the systemd service, the udev rule
+and the `ec_sys` write-support option. Afterwards run
+`sudo systemctl enable --now mystic-center.service` and log out and back in
+once for the keyboard ACL (or reboot, which also applies `ec_sys`).
+Requirements are unchanged — see [Requirements](#requirements).
+
 ### Optional: re-apply lighting at login
 
 ```bash

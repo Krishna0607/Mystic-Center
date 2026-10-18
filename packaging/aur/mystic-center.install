@@ -1,0 +1,23 @@
+post_install() {
+  printf '>>> Reloading udev rules for the RGB keyboard...\n'
+  udevadm control --reload-rules || true
+  udevadm trigger --subsystem-match=hidraw --action=add || true
+
+  printf '>>> Start the privileged backend:  sudo systemctl enable --now mystic-center.service\n'
+  printf '>>> Log out and back in once so your session gets access to the keyboard (udev ACL).\n'
+  printf '>>> If fan control reports missing write support, reboot so ec_sys loads with write_support=1.\n'
+}
+
+post_upgrade() {
+  systemctl daemon-reload || true
+  udevadm control --reload-rules || true
+  udevadm trigger --subsystem-match=hidraw --action=add || true
+
+  printf '>>> Restart the backend to pick up changes:  sudo systemctl restart mystic-center.service\n'
+}
+
+pre_remove() {
+  systemctl disable --now mystic-center.service 2>/dev/null || true
+  systemctl daemon-reload || true
+  udevadm control --reload-rules || true
+}
