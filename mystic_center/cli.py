@@ -25,9 +25,10 @@ def _snap_text(snap: dict) -> str:
         f"Battery: {fmt(bat.get('percent'), '%')} {bat.get('status') or ''} "
         f"| limit {bat.get('start_threshold')}/{bat.get('end_threshold')}"
         f" | charger {'on' if bat.get('charger_online') else 'off'}\n"
-        f"Mode: shift={modes.get('shift')} fan={modes.get('fan')} "
+        f"Mode: {perf_name(modes.get('shift'))} fan={modes.get('fan')} "
         f"cooler_boost={modes.get('cooler_boost')} "
-        f"super_battery={modes.get('super_battery')}\n"
+        f"super_battery={modes.get('super_battery')} "
+        f"super_saver={modes.get('super_saver')}\n"
         f"Perks: webcam={'on' if modes.get('webcam') else 'off'} "
         f"fn={modes.get('fn_key')} win={modes.get('win_key')}"
     )
@@ -42,15 +43,29 @@ def fmt(v, suffix=""):
         return str(v)
 
 
+_PERF_NAMES = {"eco": "battery-saving", "comfort": "balanced",
+               "turbo": "performance"}
+
+
+def perf_name(mode):
+    if not mode:
+        return "—"
+    key = str(mode).split(" ")[0].lower()
+    return _PERF_NAMES.get(key, mode)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="mystic-center", add_help=True)
     sub = p.add_subparsers(dest="cmd")
 
     sub.add_parser("status", help="print live snapshot")
-    sp = sub.add_parser("perf", help="eco | comfort | turbo")
-    sp.add_argument("mode", nargs="?", choices=["eco", "comfort", "turbo"])
+    sp = sub.add_parser("perf", help="battery-saving | balanced | performance")
+    sp.add_argument("mode", nargs="?", default=None)
     sp.add_argument("--cooler", choices=["on", "off"], default=None)
     sp.add_argument("--super-battery", choices=["on", "off"], default=None)
+    sp.add_argument("--saver", choices=["on", "off"], default=None,
+                    help="Super Battery Saver (eco + power plane + silent "
+                         "fans + 2 GHz CPU cap)")
 
     sp = sub.add_parser("fans", help="auto | silent")
     sp.add_argument("preset", nargs="?", choices=["auto", "silent"])
@@ -75,6 +90,13 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+_PERF_ALIASES = {
+    "battery-saving": "eco", "battery": "eco", "saver": "eco", "eco": "eco",
+    "balanced": "comfort", "comfort": "comfort",
+    "performance": "turbo", "turbo": "turbo",
+}
+
+
 def run(argv: list[str]) -> int:
     p = build_parser()
     args = p.parse_args(argv)
@@ -94,8 +116,17 @@ def run(argv: list[str]) -> int:
                 return 0
             if args.cmd == "perf":
                 out = {}
+                if getattr(args, "saver", None):
+                    out["saver"] = c.request(
+                        "set_super_saver", on=args.saver == "on")
                 if args.mode:
-                    out["shift"] = c.request("set_shift_mode", mode=args.mode)
+                    mode = _PERF_ALIASES.get(args.mode.lower())
+                    if mode is None:
+                        print(f"error: unknown mode {args.mode!r} — use "
+                              "battery-saving | balanced | performance",
+                              file=sys.stderr)
+                        return 1
+                    out["shift"] = c.request("set_shift_mode", mode=mode)
                 if args.cooler:
                     out["cooler"] = c.request(
                         "set_cooler_boost", on=args.cooler == "on")

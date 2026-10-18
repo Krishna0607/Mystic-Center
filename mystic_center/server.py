@@ -177,6 +177,8 @@ def _dispatch_builder(ops: PrivOps):
             return ops.set_cooler_boost(bool(args.get("on")))
         if op == "set_super_battery":
             return ops.set_super_battery(bool(args.get("on")))
+        if op == "set_super_saver":
+            return ops.set_super_saver(bool(args.get("on")))
         if op == "set_fan_preset":
             return ops.set_fan_preset(args["preset"])
         if op == "fan_status":

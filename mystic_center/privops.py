@@ -6,6 +6,7 @@ import time
 
 from . import battery, msiec, sensors
 from .ecio import ALLOWED, EC, ECError
+from .powersaver import PowerSaver
 
 _SHIFT_WAIT_S = 0.4
 _WAIT_MAX_TRIES = 4
@@ -29,6 +30,7 @@ def _wait_mode(getter, want: str) -> str:
 class PrivOps:
     def __init__(self) -> None:
         self.ec = EC()
+        self.saver = PowerSaver()
         self.shift_map_note: dict = {}
 
     def close(self) -> None:
@@ -59,6 +61,8 @@ class PrivOps:
             "fans": {"rpm": sensors.fan_rpm(),
                      "fan_mode": msiec.fan_mode(),
                      "duty": duty},
+            "system": {"ram": sensors.ram_usage(),
+                       "storage": sensors.rootfs_usage()},
             "battery": {
                 "node": batnode,
                 **charge,
@@ -78,6 +82,7 @@ class PrivOps:
             "fan": msiec.fan_mode(),
             "cooler_boost": msiec.cooler_boost(),
             "super_battery": msiec.super_battery(),
+            "super_saver": self.saver.active(),
             "webcam": msiec.webcam(),
             "fn_key": msiec.fn_key(),
             "win_key": msiec.win_key(),
@@ -87,12 +92,43 @@ class PrivOps:
 
     def set_shift_mode(self, name: str, wait: bool = True) -> dict:
         name = name.strip().lower()
+        note = None
+        if self.saver.active() and name != "eco":
+            # leaving eco defeats the saver — turn it off implicitly
+            self.set_super_saver(False, internal=True)
+            note = "Super Battery Saver turned off (mode changed)"
         if not msiec.set_shift_mode(name):
             raise RuntimeError("shift_mode write failed (permissions?)")
         result = name
         if wait:
             result = _wait_mode(lambda: (msiec.shift_mode()["name"]), name)
-        return {"set": name, "read": result}
+        return {"set": name, "read": result,
+                **({"note": note} if note else {})}
+
+    def set_super_saver(self, on: bool, internal: bool = False) -> dict:
+        on = bool(on)
+        if on and self.saver.active():
+            return {"saver": True, "detail": self.saver.status(),
+                    "note": "already on"}
+        if not on and not self.saver.active():
+            return {"saver": False, "note": "already off"}
+        detail = self.saver.enable() if on else self.saver.disable()
+        try:
+            if on:
+                msiec.set_super_battery(True)
+                msiec.set_fan_mode("silent")
+                self.set_shift_mode("eco")
+            else:
+                msiec.set_super_battery(False)
+                msiec.set_fan_mode("auto")
+                self.set_shift_mode("comfort")
+        except Exception:
+            pass  # EC part failing must not block the frequency restore
+        out = {"saver": self.saver.active(), "detail": detail}
+        if not internal:
+            out["note"] = "saver on — eco · silent fans · 2 GHz CPU cap" if on \
+                else "saver off — balanced restored"
+        return out
 
     def calibrate_shift_mode(self) -> dict:
         """Write each mode and observe raw EC bytes — builds the turbo 0xC0/C4 map."""

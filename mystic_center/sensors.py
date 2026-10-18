@@ -96,6 +96,43 @@ def system_temps() -> dict[str, float]:
     return temps
 
 
+def ram_usage() -> dict | None:
+    """MemTotal / MemAvailable from /proc/meminfo."""
+    try:
+        with open("/proc/meminfo") as fh:
+            info = {}
+            for line in fh:
+                key, rest = line.split(":", 1)
+                info[key] = int(rest.strip().split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+    total = info.get("MemTotal")
+    avail = info.get("MemAvailable")
+    if not total or avail is None:
+        return None
+    used = total - avail
+    return {"used_gb": round(used / 1048576, 1),
+            "total_gb": round(total / 1048576, 1),
+            "pct": round(used * 100 / total, 1)}
+
+
+def rootfs_usage() -> dict | None:
+    """Root-filesystem usage via statvfs."""
+    import os
+    try:
+        st = os.statvfs("/")
+        total = st.f_blocks * st.f_frsize
+        free = st.f_bfree * st.f_frsize
+    except OSError:
+        return None
+    if not total:
+        return None
+    used = total - free
+    return {"used_gb": round(used / 1e9, 1),
+            "total_gb": round(total / 1e9, 1),
+            "pct": round(used * 100 / total, 1)}
+
+
 def battery_states() -> dict[str, dict]:
     out: dict[str, dict] = {}
     for base in sorted(glob.glob("/sys/class/power_supply/*")):
