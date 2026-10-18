@@ -63,11 +63,17 @@ class RainbowWave:
         self.light = light
 
     def colors(self, t: float) -> list[str]:
+        # hue axis = COLUMNS (left→right): strong 90° step per column band,
+        # tiny 8° row smear so packets stay single-zone but the pattern
+        # unmistakably reads as a rainbow sliding left→right
         shift = 360.0 * self.direction * (t / self.period)
-        return [
-            hexc_unique((z / NUM_ZONES) * 360.0 + shift, 1.0, self.light, z)
-            for z in range(NUM_ZONES)
-        ]
+        out = []
+        for z in range(NUM_ZONES):
+            col = z % N_COLS
+            row = z // N_COLS
+            out.append(hexc_unique(col * 90.0 + row * 8.0 + shift,
+                                   1.0, self.light, z))
+        return out
 
 
 class RainbowCycle:
