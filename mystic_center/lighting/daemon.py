@@ -74,11 +74,14 @@ def stop() -> bool:
 
 
 def start_detached(effect: str, speed: float = 6.0, direction: int = 1) -> int:
-    """Spawn the animator in its own session; returns its pid."""
+    """Spawn the animator in its own session; returns its pid.
+
+    Raises RuntimeError if the child dies immediately (bad name, HID
+    permission problem…), surfacing the captured stderr tail."""
     stop()
     os.makedirs(CONFIG_DIR, exist_ok=True)
     cmd = [
-        sys.executable, "-m", "mystic_control.animate",
+        sys.executable, "-m", "mystic_center.lighting.animate",
         effect,
         "--speed", str(speed),
         "--dir", str(direction),
@@ -88,14 +91,26 @@ def start_detached(effect: str, speed: float = 6.0, direction: int = 1) -> int:
     from .keyboard import __file__ as kb_file  # noqa: F401
     package_dir = os.path.dirname(os.path.dirname(os.path.abspath(kb_file)))
     env["PYTHONPATH"] = package_dir + ":" + env.get("PYTHONPATH", "")
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        stdin=subprocess.DEVNULL,
-        start_new_session=True,
-        env=env,
-    )
+    err_path = os.path.join(CONFIG_DIR, "animate.err")
+    with open(err_path, "wb") as err_fh:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=err_fh,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+            env=env,
+        )
     with open(PID_PATH, "w") as fh:
         fh.write(str(proc.pid))
+    # verify the child is actually alive (module found, device opened)
+    time.sleep(0.5)
+    if proc.poll() is not None:
+        try:
+            with open(err_path, "rb") as fh:
+                tail = fh.read()[-400:].decode(errors="replace").strip()
+        except OSError:
+            tail = ""
+        raise RuntimeError(
+            f"animator exited immediately ({tail or 'no stderr'})")
     return proc.pid
