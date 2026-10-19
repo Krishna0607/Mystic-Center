@@ -223,6 +223,28 @@ class PrivOps:
             state["ap_error"] = str(exc)
         return state
 
+    def gpu_probe(self) -> dict:
+        """Read-only diagnostic: raw Get_AP packages + EC switch registers."""
+        if not gpumux.available():
+            return {"available": False}
+        state = gpumux.read_state()
+        state["available"] = True
+        try:
+            state["ap"] = gpumux.ap_state()
+        except (gpumux.GpuModeError, OSError) as exc:
+            state["ap_error"] = str(exc)
+        state["ap_packages"] = gpumux.probe_ap()
+        state["switch"] = gpumux.switch_state()
+        return state
+
+    def gpu_handshake_probe(self) -> dict:
+        """Trace the EC handshake by re-staging the current mode (no-op)."""
+        if not gpumux.available():
+            return {"available": False}
+        res = gpumux.handshake_probe()
+        res["available"] = True
+        return res
+
     def set_gpu_mode(self, mode: str, dry_run: bool = False) -> dict:
         """Stage a GPU mode and run MSI Center's firmware apply handshake.
 

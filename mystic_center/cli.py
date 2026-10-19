@@ -111,6 +111,11 @@ def build_parser() -> argparse.ArgumentParser:
                              "dgpu", "igpu"])
     sp.add_argument("--dry-run", action="store_true",
                     help="show what would be written, change nothing")
+    sp.add_argument("--probe", action="store_true",
+                    help="dump the raw Get_AP packages and EC switch registers")
+    sp.add_argument("--self-test", action="store_true",
+                    help="trace the EC apply handshake (re-stages the current "
+                         "mode, so the next boot is unchanged)")
     sp.add_argument("--json", action="store_true", help="raw JSON output")
     sub.add_parser("wmi2", help="inspect the MSI WMI platform interface")
     sub.add_parser("gui", help="open the dashboard")
@@ -148,6 +153,54 @@ def curve_text(curve):
 
 def _run_gpu(c, args) -> int:
     """`mystic-center gpu [hybrid|discrete|integrated]` — MSI Center's GPU switch."""
+    if args.self_test:
+        st = c.request("gpu_handshake_probe")
+        if args.json:
+            print(json.dumps(st, indent=2))
+            return 0
+        print(f"mode re-staged : {MODE_LABELS.get(st.get('mode'), st.get('mode'))}")
+        print(f"trigger value  : {st.get('trigger')}")
+        print()
+        print(f"{'t (s)':>7}  {'step':<14} {'AP byte':<9} {'ready':<6} "
+              f"{'busy':<6} {'EC 0xD1':<8} {'EC 0xBE'}")
+        for rec in st.get("trace") or []:
+            ap = rec.get("ap") or {}
+            ec = rec.get("ec") or {}
+            byte = (f"0x{ap['data_byte1']:02X}" if "data_byte1" in ap
+                    else ap.get("error", "—")[:9])
+            print(f"{rec['t']:>7.3f}  {rec['step']:<14} {byte:<9} "
+                  f"{str(ap.get('apply_ready', '—')):<6} "
+                  f"{str(ap.get('busy', '—')):<6} "
+                  f"0x{ec.get('switch_d1', 0):02X}      "
+                  f"0x{ec.get('ack_be', 0):02X}")
+        print()
+        print(st.get("note", ""))
+        return 0
+
+    if args.probe:
+        st = c.request("gpu_probe")
+        if args.json:
+            print(json.dumps(st, indent=2))
+            return 0
+        print("== UEFI variable ==")
+        for k in ("byte5", "target", "current", "supported",
+                  "attributes", "length", "reboot_pending"):
+            print(f"{k:14}: {st.get(k)}")
+        print("\n== EC mirror ==")
+        for k, v in (st.get("switch") or {}).items():
+            print(f"{k:14}: " + (f"0x{v:02X}" if isinstance(v, int) else str(v)))
+        print("\n== Get_AP packages ==")
+        for k, v in (st.get("ap_packages") or {}).items():
+            print(f"{k:14}: {v}")
+        ap = st.get("ap") or {}
+        if ap:
+            print(f"\nparsed        : data_byte1=0x{ap['data_byte1']:02X}"
+                  f"  apply_ready={ap['apply_ready']}"
+                  f"  busy={ap['busy']}")
+        if st.get("ap_error"):
+            print(f"Get_AP error  : {st['ap_error']}")
+        return 0
+
     if not args.mode:
         st = c.request("gpu_mode_state")
         if args.json:

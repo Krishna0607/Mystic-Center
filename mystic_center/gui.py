@@ -471,6 +471,10 @@ class GpuPage(Page):
              ("integrated", "Integrated")],
             self.on_mode)
         self.mode_btns.select("hybrid")
+        # The snapshot loop runs every second; it must not overwrite a
+        # selection the user has made but not yet applied.
+        self._picked: str | None = None
+        self._last_target: str | None = None
         self.mode_btns.set_valign(Gtk.Align.CENTER)
         row.add_suffix(self.mode_btns)
         g.add(row)
@@ -539,11 +543,13 @@ class GpuPage(Page):
     # ---- actions ---------------------------------------------------------------
 
     def on_mode(self, key: str) -> None:
+        self._picked = key
         self.window.toast(
             f"{GPU_MODE_INFO.get(key, (key,))[0]} selected — press Apply to stage it")
 
     def on_apply(self, *_a):
-        key = self.mode_btns.selected or "hybrid"
+        key = self._picked or self.mode_btns.selected or "hybrid"
+        self.mode_btns.select(key)
         label = GPU_MODE_INFO.get(key, (key,))[0]
         dlg = Adw.MessageDialog(
             transient_for=self.window,
@@ -569,7 +575,10 @@ class GpuPage(Page):
                 res = c.request("set_gpu_mode", mode=key)
         except (daemon_client.DaemonDown, RuntimeError) as e:
             self.window.toast(f"GPU mode change failed: {e}")
+            self.window.request_snapshot()
             return
+        self._picked = res.get("mode", key)
+        self._last_target = None      # force a resync from the new state
         self.window.toast(
             f"{res.get('label', key)} staged — save your work and shut down "
             "completely to apply")
@@ -605,8 +614,15 @@ class GpuPage(Page):
         for key, btn in self.mode_btns.buttons.items():
             btn.set_sensitive(key in sup)
 
-        if tgt:
-            self.mode_btns.select(tgt)
+        # Sync the selector from the daemon only when the target actually
+        # changes (initial load, or a completed apply). Re-selecting on every
+        # snapshot would snap the user's pending choice back to the staged
+        # target before they could press Apply.
+        if tgt and tgt != self._last_target:
+            self._last_target = tgt
+            if self._picked is None or self._picked == tgt:
+                self._picked = tgt
+                self.mode_btns.select(tgt)
 
         mux = st.get("mux_ec")
         self.mux_label.set_label(

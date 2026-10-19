@@ -216,6 +216,10 @@ def _dispatch_builder(ops: PrivOps):
             return ops.set_fn_switch(args["side"])
         if op == "gpu_mode_state":
             return ops.gpu_mode_state()
+        if op == "gpu_probe":
+            return ops.gpu_probe()
+        if op == "gpu_handshake_probe":
+            return ops.gpu_handshake_probe()
         if op == "set_gpu_mode":
             return ops.set_gpu_mode(args["mode"], bool(args.get("dry_run")))
         if op == "ec_dump":

@@ -219,4 +219,81 @@ try:
 finally:
     gpumux.VAR_PATH = _orig_var_path
 
-print(f"\nALL {CHECKS} CHECKS PASSED ✓")
+# The AP data byte is a two-bit state machine, verified live on this unit:
+#   0x02 = apply-ready (latched after a completed apply)
+#   0x01 = trigger in flight
+#   0x00 = transient
+check("gpu AP state: 0x02 is ready and not busy",
+      bool(0x02 & gpumux.AP_READY_MASK) and not (0x02 & gpumux.AP_BUSY_MASK))
+check("gpu AP state: 0x01 is busy and not ready",
+      not (0x01 & gpumux.AP_READY_MASK) and bool(0x01 & gpumux.AP_BUSY_MASK))
+check("gpu AP state: ready and busy are disjoint",
+      gpumux.AP_READY_MASK & gpumux.AP_BUSY_MASK == 0)
+
+# A failed post-trigger step must keep the target staged, not rewrite the
+# variable underneath an EC that is already applying it.
+import mystic_center.gpumux as _gm  # noqa: E402
+_tmpdir2 = _tf.mkdtemp()
+_tmpvar2 = os.path.join(_tmpdir2, "MsiDCVarData")
+with open(_tmpvar2, "wb") as fh:
+    fh.write((0x00000007).to_bytes(4, "little")
+             + bytes([0x01, 0x01, 0x00, 0x06, 0x00, 0x30, 0x01] + [0] * 13))
+
+_orig = (_gm.VAR_PATH, _gm.ap_state, _gm._set_data, _gm._wait_apply_ready)
+_gm.VAR_PATH = _tmpvar2
+_gm.ap_state = lambda: {"flag": 1, "data_byte1": 0x02,
+                        "apply_ready": True, "busy": False,
+                        "raw": "0100020000000000"}
+
+
+def _boom(*_a, **_k):
+    raise _gm.GpuModeError("simulated readiness timeout")
+
+
+_gm._wait_apply_ready = _boom
+try:
+    _gm._set_data = lambda addr, value: None
+    try:
+        _gm.set_mode("discrete")
+        check("gpu post-trigger failure raises", False)
+    except _gm.GpuModeError as exc:
+        check("gpu post-trigger failure raises", "trigger" in str(exc))
+    staged = open(_tmpvar2, "rb").read()[4:]
+    check("gpu post-trigger failure keeps target staged (no rollback)",
+          gpumux.decode(staged)["target"] == "discrete")
+
+    # Preflight: a latched apply-ready (0x02) is the normal resting state and
+    # must NOT block the next switch. Only an in-flight trigger (0x01) may.
+    calls = []
+    _gm._wait_apply_ready = lambda: {"data_byte1": 0x02}
+    _gm._set_data = lambda addr, value: calls.append((addr, value))
+    with open(_tmpvar2, "wb") as fh:
+        fh.write((0x00000007).to_bytes(4, "little")
+                 + bytes([0x01, 0x01, 0x00, 0x06, 0x00, 0x30, 0x01] + [0] * 13))
+    res = _gm.set_mode("integrated")
+    check("gpu latched apply-ready does not block a switch",
+          gpumux.decode(open(_tmpvar2, "rb").read()[4:])["target"] == "integrated")
+    check("gpu trigger preserves upper bits of the AP data byte",
+          (0xD1, 0x01) in calls)
+    check("gpu successful switch acknowledges apply-ready",
+          (0xBE, 0x02) in calls and res["shutdown_required"] is True)
+
+    # An in-flight trigger is the genuinely ambiguous state: refuse before
+    # touching the variable.
+    _gm.ap_state = lambda: {"flag": 1, "data_byte1": 0x01,
+                            "apply_ready": False, "busy": True, "raw": ""}
+    with open(_tmpvar2, "wb") as fh:
+        fh.write((0x00000007).to_bytes(4, "little")
+                 + bytes([0x01, 0x01, 0x00, 0x06, 0x00, 0x30, 0x01] + [0] * 13))
+    before = open(_tmpvar2, "rb").read()
+    try:
+        _gm.set_mode("discrete")
+        check("gpu in-flight trigger refused", False)
+    except _gm.GpuModeError as exc:
+        check("gpu in-flight trigger refused", "in flight" in str(exc))
+    check("gpu in-flight trigger leaves the variable untouched",
+          open(_tmpvar2, "rb").read() == before)
+finally:
+    _gm.VAR_PATH, _gm.ap_state, _gm._set_data, _gm._wait_apply_ready = _orig
+
+print(f"\nALL {CHECKS} CHECKS PASSED \u2713")

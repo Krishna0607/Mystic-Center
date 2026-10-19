@@ -189,6 +189,8 @@ mystic-center fn-swap right          # Fn on the right side
 mystic-center gpu                    # GPU MUX state (MSHybrid/Discrete/Integrated)
 mystic-center gpu discrete           # stage dGPU mode + firmware handshake
 mystic-center gpu igpu --dry-run     # show the byte transition, write nothing
+mystic-center gpu --probe            # raw Get_AP packages + EC switch registers
+mystic-center gpu --self-test        # trace the EC handshake, boot mode unchanged
 mystic-center calibrate              # raw EC mode-code exploration (safe)
 mystic-center lighting steady FF7F20 # the full lighting CLI
 mystic-center lighting wave --rainbow --dir right --speed medium
@@ -215,9 +217,12 @@ mystic-center                        # GUI
 - Charge limits are clamped (start ≤ end − 5, end ≤ 100).
 - **GPU MUX switching** writes the `MsiDCVarData` UEFI variable (only bits 0–1
   of byte 5, attributes verified) and runs MSI Center's EC apply handshake
-  through the WMI platform interface. Every step is read back, a failed step
-  restores the previous target, and the app never reboots or powers off on its
-  own — the new mode applies on the next full power-on. See
+  through the WMI platform interface. Every step is read back. A failure
+  before the EC trigger restores the previous target; after the trigger the
+  target stays staged, because the EC has already taken it. The app never
+  reboots or powers off on its own — the new mode applies on the next full
+  power-on. The preflight refuses only while a trigger is in flight (bit 0);
+  the apply-ready bit stays latched after a completed switch. See
   [`docs/GPU-MUX-MAP.md`](docs/GPU-MUX-MAP.md).
 - If anything odd happens, a full laptop power-off (cold boot) restores the EC
   to factory defaults.
@@ -242,7 +247,13 @@ mystic-center                        # GUI
   variable, i.e. no switchable MUX. Nothing else is affected.
 - **GPU mode staged but nothing changed** — the firmware applies it on the
   next power-on: shut down completely and start again (a warm reboot is not
-  enough). `mystic-center gpu` shows `reboot pending` until then.
+  enough). `mystic-center gpu` shows `reboot pending` until then. This is a
+  hardware MUX limitation, not an app one — MSI Center also requires a
+  restart. For a no-reboot way to run a program on the dGPU while in
+  MSHybrid mode, use PRIME render offload:
+  `__NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia <command>`.
+- **GPU switch says "apply is already in flight"** — the EC is mid-trigger.
+  Wait a few seconds; if it persists, shut down fully rather than retrying.
 
 ## Status of features
 
@@ -255,7 +266,7 @@ mystic-center                        # GUI
 | Custom fan curves | ✅ **live-validated** (2026-10-18) — MSI-Center parity via `msi_wmi_platform` (WMI2 tables); AP-bit round-trip exact (`0x0D`↔`0x8D`), every write readback-verified, duty tables drive real RPM (CPU 2962→4137, GPU 0→2981), clean restore to firmware auto; `sudo tools/wmi2_probe.py --write-test` remains for first-contact checks on fresh machines |
 | Battery charge-limit sliders | ✅ kernel interface; values verified |
 | 24-zone RGB keyboard | ✅ full MSI-Center parity set (wave, dance, wheel, bouncy ball, Customize, all-sync, Save/Revert to MCU) — live-verified on hardware incl. wave parameter sweep and both directions (2026-10-18); packet-level parity tests passing |
-| GPU MUX switch (MSHybrid / Discrete / Integrated) | ✅ MSI-Center parity — UEFI `MsiDCVarData` byte 5 + EC apply handshake (`0xD1` trigger → apply-ready → `0xBE 0x02` ack), capability-gated, readback-verified, rollback on failure; all three modes advertised by this unit's firmware |
+| GPU MUX switch (MSHybrid / Discrete / Integrated) | ✅ **handshake live-validated** (2026-10-19) — UEFI `MsiDCVarData` byte 5 + EC apply handshake (`0xD1` trigger → apply-ready → `0xBE 0x02` ack), traced `0x02 → 0x01 → 0x02`; capability-gated, readback-verified, conditional rollback; all three modes advertised by this unit's firmware; boot application still requires a full power-on (hardware MUX) |
 | Webcam / Fn-side swap | ✅ via msi-ec |
 | Autostart + packaging | ✅ systemd service + .desktop |
 

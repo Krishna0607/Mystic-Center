@@ -50,18 +50,41 @@ apply it. This rides the same `MSI_ACPI` WMI device as fan curves
 (see [`WMI2-MAP.md`](WMI2-MAP.md)), through the `get_ap` / `set_data`
 debugfs methods:
 
-1. `Get_AP` → package byte 2 is the data byte; **bit 1 = apply-ready**.
-2. Refuse to start if apply-ready is already asserted (ambiguous state).
+1. `Get_AP` → package byte 2 is a **two-bit state machine**:
+
+   | value | meaning |
+   |---|---|
+   | `0x02` | **apply-ready** — latched after a completed apply |
+   | `0x01` | **trigger in flight** — EC is applying, do not touch the target |
+   | `0x00` | transient / idle between the two |
+
+2. Preflight refuses **only on bit 0** (trigger in flight). Bit 1 is *not*
+   an error: it stays latched at `0x02` after the first completed switch,
+   which is the normal resting state. (Refusing on bit 1 was the original
+   bug — it blocked every switch after the first.)
 3. Write the UEFI variable, read it back and verify the whole payload.
 4. `Get_AP` again; **trigger** = `Set_Data(0xD1, (data_byte1 & 0xFC) | 0x01)`
    — the upper six bits are preserved from the live AP byte, bit 0 is set.
-5. Poll `Get_AP` every 250 ms for up to 5 s until apply-ready asserts.
+5. Poll `Get_AP` every 250 ms for up to 5 s until bit 1 is set **and bit 0
+   is clear** (`0x02`). A single poll of a stale `0x02` is not accepted as
+   proof the new trigger completed.
 6. **Acknowledge** = `Set_Data(0xBE, 0x02)`.
-7. If any step fails after the variable was written, the previous target is
-   restored and re-verified.
+7. Failures are handled by phase:
+   - **before** the trigger: the previous target is restored and verified;
+   - **after** the trigger: the target is left staged (rewriting the
+     variable would disagree with what the EC is already applying) and the
+     user is told to power off fully.
 
-Live AP read on this unit: data byte `0x0A`, apply-ready clear — i.e. the
-trigger is `0x09`, matching the characterised sequence.
+Verified trace on this unit, captured with
+`mystic-center gpu --self-test` (re-stages the *current* mode, so the boot
+config is unchanged):
+
+```
+0.000  before        0x02  ready, not busy
+0.011  trigger-sent  0x01  in flight
+0.118  ready         0x02  apply complete
+0.122  ack           Set_Data(0xBE, 0x02)
+```
 
 The package layout is confirmed by the in-tree kernel driver
 (`drivers/platform/x86/msi-wmi-platform.c`: `MSI_PLATFORM_GET_AP = 0x19`,
@@ -72,7 +95,7 @@ The package layout is confirmed by the in-tree kernel driver
 | Reg | Meaning | This unit (hybrid) |
 |---|---|---|
 | `0x2E` bit 6 | PXCT — panel path to the dGPU | `0x0B` → bit clear = hybrid |
-| `0xD1` bits 0/1 | switch trigger state | `0x00` |
+| `0xD1` bits 0/1 | switch trigger state | `0x02` (ready) |
 
 These are **read-only** in this app: the apply path is the WMI handshake,
 not an EC byte poke. They are surfaced in `mystic-center gpu` for status.
@@ -83,6 +106,24 @@ The firmware applies the staged target on **power-on**, not on a warm
 reboot — MSI Center's own prompt says "restart", but the characterised
 sequence requires a full shutdown (`poweroff`, then power on). Until then
 `target != current` and the GUI shows a "reboot pending" row.
+
+**Can the restart be skipped?** No. The MUX is a hardware switch on the
+panel/PCIe path, and this firmware latches the routing during POST, before
+any OS driver loads. The EC apply handshake only arms the change; it does
+not re-route a running system. Live reads confirm it: after a successful
+trigger + ack, EC `0x2E` bit 6 (PXCT panel path) is unchanged. MSI Center
+has the same limitation — its own dialog asks for a restart. Unbinding the
+GPU drivers and re-scanning PCIe would not move the panel path and risks a
+black screen, so this app deliberately does not attempt it.
+
+**No-reboot alternative:** while in MSHybrid mode the dGPU is still
+available through PRIME render offload:
+
+```sh
+__NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia <command>
+# or, for a single application:
+DRI_PRIME=1 <command>
+```
 
 ## 5. What the app exposes
 
@@ -100,8 +141,8 @@ sequence requires a full shutdown (`poweroff`, then power on). Until then
 - MSI Center 2.0.74.0's GPU switch flow (see
   [`MSI-CENTER-RE.md`](MSI-CENTER-RE.md) §5, `UC_NB_Base`).
 - In-tree `msi-wmi-platform` driver (method ids and 32-byte package).
-- Live reads on this unit: variable `0x30`, AP data byte `0x0A`, EC
-  `0x2E = 0x0B`.
+- Live reads on this unit: variable `0x30`, AP data byte `0x02`
+  (ready, not busy), EC `0x2E = 0x0B`.
 - The variable/trigger layout independently matches the
   `ElXreno/msi-gpu-switcher` and `steelbrain/msi-gpu-mux-switch` projects,
   which characterise the same `MsiDCVarData` byte 5 and the same

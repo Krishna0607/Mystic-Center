@@ -23,10 +23,17 @@ pieces of firmware, all written together by MSI Center and by this module:
 2. **EC apply handshake** over the ``MSI_ACPI`` WMI device (debugfs
    ``get_ap`` / ``set_data``, the same interface used for fan curves):
 
-   * ``Get_AP`` → data byte 1, bit 1 is *apply-ready*
+   * ``Get_AP`` → package byte 2 is a two-bit state machine: bit 1
+     (``0x02``) = *apply-ready*, bit 0 (``0x01``) = *trigger in flight*
    * trigger  = ``Set_Data(0xD1, (ap_byte1 & 0xFC) | 0x01)``
    * wait ≤ 5 s for apply-ready, then
    * ack      = ``Set_Data(0xBE, 0x02)``
+
+   Apply-ready stays latched after the acknowledgement, so the preflight
+   checks for an in-flight trigger (bit 0) instead of refusing whenever
+   apply-ready is set — the latter blocks every switch after the first.
+   Verified live: ``0x02`` (ready) → ``0x01`` (trigger sent) → ``0x02``
+   (ready) → ack.
 
 3. **EC mirror registers** (read-only here, for status): ``0x2E`` bit 6 is
    the PXCT mux state, ``0xD1`` carries the switch bits.
@@ -39,8 +46,9 @@ projects.
 
 Safety: the flow is only ever *staged* here — firmware applies it on the
 next power-on, and the caller is told a full shutdown is required. Every
-step is read back and verified, and a failed step restores the previous
-target.
+step is read back and verified. A failure before the trigger restores the
+previous target; a failure after it leaves the target staged, because the
+EC has already taken it.
 """
 
 from __future__ import annotations
@@ -88,7 +96,20 @@ EC_SWITCH_REG = 0xD1
 AP_DATA_ADDR = 0xD1
 AP_ACK_ADDR = 0xBE
 AP_ACK_VALUE = 0x02
+# The Get_AP data byte is a two-bit state machine, verified live on this
+# unit (see handshake_probe() / docs/GPU-MUX-MAP.md §2):
+#
+#   0x02  bit1 set, bit0 clear  → apply-ready (latched after a completed apply)
+#   0x01  bit0 set, bit1 clear  → trigger in flight
+#   0x00  neither               → transient / idle between the two
+#
+# The reference implementation refuses to start when apply-ready is set,
+# which works only on a machine that has never switched: bit 1 stays
+# latched after the acknowledgement, so that preflight blocks every
+# subsequent transition. The genuinely ambiguous state is an in-flight
+# trigger (bit 0), so that is what the preflight checks.
 AP_READY_MASK = 0x02
+AP_BUSY_MASK = 0x01
 TRIGGER_MASK = 0x01
 AP_POLL_S = 0.25
 AP_READY_TIMEOUT_S = 5.0
@@ -310,7 +331,35 @@ def ap_state() -> dict:
         "flag": out[0],
         "data_byte1": out[2],
         "apply_ready": bool(out[2] & AP_READY_MASK),
+        "busy": bool(out[2] & AP_BUSY_MASK),
         "raw": out[:8].hex(),
+    }
+
+
+def probe_ap() -> dict:
+    """Read-only: dump Get_AP for every subfeature (root diagnostic).
+
+    Used to pin down the package layout on a new board. Sends only GET
+    methods — no Set_Data, no variable writes.
+    """
+    out: dict = {}
+    for sub in range(4):
+        payload = bytearray(32)
+        payload[0] = sub
+        try:
+            raw = _invoke("get_ap", bytes(payload))
+            out[f"get_ap[{sub:#04x}]"] = raw.hex()
+        except (GpuModeError, OSError) as exc:
+            out[f"get_ap[{sub:#04x}]"] = f"error: {exc}"
+    return out
+
+
+def switch_state() -> dict:
+    """Read-only: EC mirror registers used by the handshake."""
+    return {
+        "mux_2e": _read_ec_byte(EC_MUX_REG),
+        "switch_d1": _read_ec_byte(EC_SWITCH_REG),
+        "ack_be": _read_ec_byte(AP_ACK_ADDR),
     }
 
 
@@ -324,15 +373,24 @@ def _set_data(addr: int, value: int) -> None:
 
 
 def _wait_apply_ready(timeout: float = AP_READY_TIMEOUT_S) -> dict:
+    """Poll until the EC reports apply-ready after a trigger.
+
+    The state machine walks ``0x01`` (trigger in flight) → ``0x02``
+    (ready). Apply-ready may already read set from the *previous* apply
+    for a moment before the new trigger is consumed, so a single set bit
+    is not proof: require bit 1 set with bit 0 clear, after at least one
+    poll, and treat a steady ``0x01`` as in-flight until the deadline.
+    """
     deadline = time.monotonic() + timeout
     while True:
         time.sleep(AP_POLL_S)
         state = ap_state()
-        if state["apply_ready"]:
+        if state["apply_ready"] and not state["busy"]:
             return state
         if time.monotonic() >= deadline:
             raise GpuModeError(
-                f"firmware did not assert apply-ready within {timeout:.0f} s")
+                f"firmware did not assert apply-ready within {timeout:.0f} s "
+                f"(Get_AP data byte 0x{state['data_byte1']:02X})")
 
 
 # ---- the switch ------------------------------------------------------------
@@ -381,12 +439,18 @@ def set_mode(mode: str, dry_run: bool = False) -> dict:
         result["note"] = "dry run — firmware untouched"
         return result
 
-    # Preflight: never start from an ambiguous firmware state.
+    # Preflight: refuse only when a trigger is genuinely in flight.
+    #
+    # apply-ready (bit 1) stays latched after a completed apply — it is the
+    # normal resting state once the machine has switched at least once.
+    # Refusing on it would block every transition after the first, which is
+    # exactly what happened on this unit. An in-flight trigger (bit 0) is
+    # the ambiguous case: the EC is mid-apply and the target must not move.
     pre = ap_state()
-    if pre["apply_ready"]:
+    if pre["busy"]:
         raise GpuModeError(
-            "apply-ready is already asserted before any write — refusing an "
-            "ambiguous transition")
+            "an EC apply is already in flight (trigger bit set) — power off "
+            "fully before switching again")
     result["ap_before"] = f"0x{pre['data_byte1']:02X}"
 
     _write_var(before_attrs, bytes(staged))
@@ -395,22 +459,39 @@ def set_mode(mode: str, dry_run: bool = False) -> dict:
         raise GpuModeError("UEFI target write verification failed")
     result["byte5_after"] = decode(after_payload)["byte5"]
 
+    triggered = False
     try:
         ap = ap_state()
-        if ap["apply_ready"]:
+        if ap["busy"]:
             raise GpuModeError(
-                "apply-ready became set before the trigger — refusing an "
-                "ambiguous transition")
+                "an EC apply started while staging — refusing an ambiguous "
+                "transition")
         trigger = (ap["data_byte1"] & 0xFC) | TRIGGER_MASK
         _set_data(AP_DATA_ADDR, trigger)
+        triggered = True
         result["trigger"] = f"Set_Data(0x{AP_DATA_ADDR:02X}, 0x{trigger:02X})"
 
         ready = _wait_apply_ready()
         result["apply_ready_byte1"] = f"0x{ready['data_byte1']:02X}"
         _set_data(AP_ACK_ADDR, AP_ACK_VALUE)
         result["ack"] = f"Set_Data(0x{AP_ACK_ADDR:02X}, 0x{AP_ACK_VALUE:02X})"
-    except Exception:
-        # Put the previous target back so the next boot is unchanged.
+    except Exception as exc:
+        if triggered:
+            # The EC has the trigger. Rewriting the variable now would make
+            # the staged target disagree with what the EC is applying, so
+            # leave it staged and tell the caller the truth.
+            result["triggered"] = True
+            result["error"] = str(exc)
+            result["staged"] = True
+            result["shutdown_required"] = True
+            result["warning"] = (
+                "the apply trigger was already sent, so the target stays "
+                "staged; power off fully to let the firmware settle")
+            raise GpuModeError(
+                f"{exc} — the EC apply trigger was already sent, so "
+                f"{MODE_LABELS[target]} remains staged; perform a full "
+                "shutdown to let the firmware settle") from exc
+        # Nothing reached the EC: put the previous target back.
         try:
             restore = bytearray(before_payload)
             _write_var(before_attrs, bytes(restore))
@@ -422,6 +503,73 @@ def set_mode(mode: str, dry_run: bool = False) -> dict:
     result["state"] = read_state()
     result["shutdown_required"] = True
     return result
+
+
+def handshake_probe(timeout: float = AP_READY_TIMEOUT_S,
+                    poll: float = 0.1) -> dict:
+    """Trace the EC apply handshake without changing the boot mode.
+
+    Re-stages the *current* target, so the UEFI variable keeps the mode the
+    firmware is already running — the trace exercises the trigger/ack path
+    while leaving the next boot unchanged. Refuses when a different mode is
+    already staged (that would silently apply it).
+    """
+    attrs, payload = _read_var()
+    info = decode(payload)
+    if info["target"] != info["current"]:
+        raise GpuModeError(
+            "a different mode is already staged — power off to apply or "
+            "re-stage the current mode before running a self-test")
+    pre = ap_state()
+    if pre["busy"]:
+        raise GpuModeError(
+            "an EC apply is already in flight — wait for it to finish "
+            "before running a self-test")
+
+    trace: list[dict] = []
+    t0 = time.monotonic()
+
+    def snap(tag: str) -> dict:
+        rec: dict = {"t": round(time.monotonic() - t0, 3), "step": tag}
+        try:
+            rec["ap"] = ap_state()
+        except (GpuModeError, OSError) as exc:
+            rec["ap"] = {"error": str(exc)}
+        rec["ec"] = switch_state()
+        trace.append(rec)
+        return rec
+
+    snap("before")
+    _write_var(attrs, payload)          # same bytes: verifies the write path
+    snap("var-written")
+
+    ap = ap_state()
+    trigger = (ap["data_byte1"] & 0xFC) | TRIGGER_MASK
+    _set_data(AP_DATA_ADDR, trigger)
+    snap("trigger-sent")
+
+    deadline = time.monotonic() + timeout
+    ready_after = None
+    while time.monotonic() < deadline:
+        time.sleep(poll)
+        st = ap_state()
+        if st["apply_ready"] and not st["busy"]:
+            ready_after = st
+            snap("ready")
+            break
+    if ready_after is None:
+        snap("timeout")
+
+    _set_data(AP_ACK_ADDR, AP_ACK_VALUE)
+    snap("ack-sent")
+
+    return {
+        "mode": info["target"],
+        "trigger": f"0x{trigger:02X}",
+        "ready_after": ready_after,
+        "trace": trace,
+        "note": "boot mode unchanged — the current target was re-staged",
+    }
 
 
 def restore_target(mode: str) -> dict:
