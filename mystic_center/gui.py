@@ -440,6 +440,217 @@ class PerfPage(Page):
         pass
 
 
+# ==================================================================== gpu
+
+GPU_MODE_INFO = {
+    "hybrid": ("MSHybrid", "Both GPUs active · Optimus battery life · "
+                           "dGPU renders, iGPU presents"),
+    "discrete": ("Discrete", "dGPU drives the panel directly · highest FPS · "
+                             "more power draw"),
+    "integrated": ("Integrated", "iGPU only · dGPU powered down · "
+                                 "maximum battery life"),
+}
+
+
+class GpuPage(Page):
+    """GPU MUX switch — MSI Center's 'GPU Switch' (hybrid/discrete/integrated)."""
+
+    def __init__(self, window):
+        super().__init__(window, "video-display-symbolic")
+
+        g = Adw.PreferencesGroup(
+            title="Graphics mode (MUX switch)",
+            description="Firmware-level panel routing. Changing it stages the "
+                        "mode and requires a full shutdown to apply.")
+        self.col.append(g)
+
+        row = Adw.ActionRow(title="Mode",
+                            subtitle="Choose the graphics mode to stage")
+        self.mode_btns = SegButtons(
+            [("hybrid", "MSHybrid"), ("discrete", "Discrete"),
+             ("integrated", "Integrated")],
+            self.on_mode)
+        self.mode_btns.select("hybrid")
+        self.mode_btns.set_valign(Gtk.Align.CENTER)
+        row.add_suffix(self.mode_btns)
+        g.add(row)
+
+        self.apply_row = Adw.ActionRow(
+            title="Apply staged mode",
+            subtitle="Runs the MSI Center firmware handshake, then asks for a "
+                     "full shutdown")
+        apply_btn = Gtk.Button(label="Apply")
+        apply_btn.add_css_class("suggested-action")
+        apply_btn.set_valign(Gtk.Align.CENTER)
+        apply_btn.connect("clicked", self.on_apply)
+        self.apply_row.add_suffix(apply_btn)
+        g.add(self.apply_row)
+
+        self.pending_row = Adw.ActionRow(
+            title="Reboot pending",
+            subtitle="A different mode is staged — power off fully to apply")
+        self.pending_row.set_visible(False)
+        g.add(self.pending_row)
+
+        g_status = Adw.PreferencesGroup(title="Current state")
+        self.col.append(g_status)
+
+        self.cur_row = _mk_row("Active mode", "reported by firmware")
+        self.cur_label = Gtk.Label(label="—")
+        self.cur_label.add_css_class("monospace")
+        self.cur_label.add_css_class("heading")
+        self.cur_row.add_suffix(self.cur_label)
+        g_status.add(self.cur_row)
+
+        self.tgt_row = _mk_row("Staged target", "applied on next power-on")
+        self.tgt_label = Gtk.Label(label="—")
+        self.tgt_label.add_css_class("monospace")
+        self.tgt_row.add_suffix(self.tgt_label)
+        g_status.add(self.tgt_row)
+
+        self.sup_row = _mk_row("Supported modes", "advertised by the firmware")
+        self.sup_label = Gtk.Label(label="—")
+        self.sup_label.add_css_class("monospace")
+        self.sup_row.add_suffix(self.sup_label)
+        g_status.add(self.sup_row)
+
+        self.mux_row = _mk_row("EC MUX register", "0x2E bit 6 (PXCT)")
+        self.mux_label = Gtk.Label(label="—")
+        self.mux_label.add_css_class("monospace")
+        self.mux_row.add_suffix(self.mux_label)
+        g_status.add(self.mux_row)
+
+        g_gpu = Adw.PreferencesGroup(title="Detected GPUs")
+        self.col.append(g_gpu)
+        self.gpu_rows: list[Adw.ActionRow] = []
+        self.gpu_group = g_gpu
+
+        self.warn = Adw.PreferencesGroup()
+        self.col.append(self.warn)
+        note = Adw.ActionRow(
+            title="What happens on Apply",
+            subtitle="The target is written to the MsiDCVarData UEFI variable, "
+                     "the EC apply trigger runs, then the firmware acknowledges. "
+                     "Nothing changes until the next power-on. If any step "
+                     "fails, the previous target is restored.")
+        note.set_activatable(False)
+        self.warn.add(note)
+
+    # ---- actions ---------------------------------------------------------------
+
+    def on_mode(self, key: str) -> None:
+        self.window.toast(
+            f"{GPU_MODE_INFO.get(key, (key,))[0]} selected — press Apply to stage it")
+
+    def on_apply(self, *_a):
+        key = self.mode_btns.selected or "hybrid"
+        label = GPU_MODE_INFO.get(key, (key,))[0]
+        dlg = Adw.MessageDialog(
+            transient_for=self.window,
+            heading=f"Switch to {label}?",
+            body="The firmware mode changes on the next power-on. Save all work "
+                 "and close applications before shutting down.\n\n"
+                 "A full shutdown (power off) is required — a reboot alone does "
+                 "not apply the MUX change.")
+        dlg.add_response("cancel", "Cancel")
+        dlg.add_response("apply", f"Stage {label}")
+        dlg.set_response_appearance("apply", Adw.ResponseAppearance.SUGGESTED)
+        dlg.set_default_response("cancel")
+        dlg.set_close_response("cancel")
+        dlg.connect("response", self._apply_confirmed, key)
+        dlg.present()
+
+    def _apply_confirmed(self, dlg, response, key: str) -> None:
+        dlg.destroy()
+        if response != "apply":
+            return
+        try:
+            with daemon_client.Client(timeout=15.0) as c:
+                res = c.request("set_gpu_mode", mode=key)
+        except (daemon_client.DaemonDown, RuntimeError) as e:
+            self.window.toast(f"GPU mode change failed: {e}")
+            return
+        self.window.toast(
+            f"{res.get('label', key)} staged — save your work and shut down "
+            "completely to apply")
+        self.window.request_snapshot()
+
+    # ---- refresh ---------------------------------------------------------------
+
+    def refresh(self, snap: dict) -> None:
+        st = snap.get("gpu_mode") or {}
+        if not st.get("available"):
+            self.mode_btns.set_sensitive(False)
+            self.apply_row.set_sensitive(False)
+            self.cur_label.set_label("not available")
+            self.tgt_label.set_label("—")
+            self.sup_label.set_label("—")
+            self.mux_label.set_label("—")
+            self.pending_row.set_visible(False)
+            return
+
+        self.mode_btns.set_sensitive(True)
+        self.apply_row.set_sensitive(True)
+
+        cur, tgt = st.get("current"), st.get("target")
+        self.cur_label.set_label(
+            GPU_MODE_INFO.get(cur, (cur,))[0] if cur else "unknown")
+        self.tgt_label.set_label(
+            GPU_MODE_INFO.get(tgt, (tgt,))[0] if tgt else "unknown")
+        sup = st.get("supported") or []
+        self.sup_label.set_label(
+            " · ".join(GPU_MODE_INFO.get(m, (m,))[0] for m in sup) or "—")
+
+        # Only offer modes the firmware advertises
+        for key, btn in self.mode_btns.buttons.items():
+            btn.set_sensitive(key in sup)
+
+        if tgt:
+            self.mode_btns.select(tgt)
+
+        mux = st.get("mux_ec")
+        self.mux_label.set_label(
+            f"0x{mux:02X} · {'discrete' if mux & 0x40 else 'hybrid'}"
+            if mux is not None else "—")
+        self.pending_row.set_visible(bool(st.get("reboot_pending")))
+
+        # Detected GPUs (from the detailed state op, filled lazily)
+        self._refresh_gpus()
+
+    def _refresh_gpus(self) -> None:
+        try:
+            with daemon_client.Client() as c:
+                st = c.request("gpu_mode_state")
+        except (daemon_client.DaemonDown, RuntimeError):
+            return
+        gpus = st.get("gpus") or []
+        if len(self.gpu_rows) == len(gpus):
+            for row, gpu in zip(self.gpu_rows, gpus):
+                row.set_subtitle(self._gpu_text(gpu))
+            return
+        for row in self.gpu_rows:
+            self.gpu_group.remove(row)
+        self.gpu_rows = []
+        for gpu in gpus:
+            row = Adw.ActionRow(title=gpu["pci"],
+                                subtitle=self._gpu_text(gpu))
+            self.gpu_group.add(row)
+            self.gpu_rows.append(row)
+        if not gpus:
+            row = Adw.ActionRow(title="No display controllers detected")
+            self.gpu_group.add(row)
+            self.gpu_rows.append(row)
+
+    @staticmethod
+    def _gpu_text(gpu: dict) -> str:
+        vendor = {"0x10de": "NVIDIA", "0x8086": "Intel",
+                  "0x1002": "AMD"}.get(gpu.get("vendor", ""), gpu.get("vendor", ""))
+        return f"{vendor} {gpu.get('device', '')} · driver {gpu.get('driver')}"
+
+    def reachability(self, ok, why):
+        pass
+
+
 # ==================================================================== fans
 
 class CurveEditor(Gtk.Frame):
@@ -2269,11 +2480,14 @@ class CenterWindow(Adw.ApplicationWindow):
 
         self.pages: list[Page] = [
             OverviewPage(self), PerfPage(self), FansPage(self),
-            BatteryPage(self), LightingPage(self), SettingsPage(self),
+            BatteryPage(self), GpuPage(self), LightingPage(self),
+            SettingsPage(self),
         ]
-        names = ["overview", "performance", "fans", "battery", "lighting", "settings"]
+        names = ["overview", "performance", "fans", "battery", "gpu",
+                 "lighting", "settings"]
         icons = [p.icon_name for p in self.pages]
-        titles = ["Overview", "Performance", "Fans", "Battery", "Lighting", "Settings"]
+        titles = ["Overview", "Performance", "Fans", "Battery", "GPU",
+                  "Lighting", "Settings"]
         for name, title, page, icon in zip(names, titles, self.pages, icons):
             self.stack.add_titled(page, name, title)
 
@@ -2331,6 +2545,18 @@ class CenterWindow(Adw.ApplicationWindow):
     def _retry_now(self, *_a) -> None:
         self.banner.set_revealed(False)
         self._apply_snap(None, "manual retry pending")
+
+    def request_snapshot(self) -> None:
+        """Force an immediate snapshot refresh (after a slow daemon op)."""
+        def _run() -> None:
+            try:
+                with daemon_client.Client(timeout=5.0) as c:
+                    snap = c.snapshot()
+            except Exception as e:
+                GLib.idle_add(self._apply_snap, None, str(e))
+                return
+            GLib.idle_add(self._apply_snap, snap, "")
+        threading.Thread(target=_run, daemon=True).start()
 
     def _toggle_fullscreen(self, *_a) -> None:
         if self.is_fullscreen():

@@ -146,4 +146,77 @@ with client_mod.Client() as c:
 server.shutdown()
 server.server_close()
 
+# ---------------------------------------------------------------- GPU MUX
+
+from mystic_center import gpumux  # noqa: E402
+
+# byte5 layout, verified against this machine's live MsiDCVarData
+info = gpumux.decode(bytes([0x01, 0x01, 0x00, 0x06, 0x00, 0x30, 0x01] + [0] * 13))
+check("gpu decode: hybrid target and current", 
+      info["target"] == "hybrid" and info["current"] == "hybrid")
+check("gpu decode: capability bits",
+      info["new_switch"] and info["integrated_supported"]
+      and info["discrete_supported"] and not info["reserved"])
+check("gpu supported modes: all three advertised",
+      gpumux.supported_modes(info) == ["hybrid", "discrete", "integrated"])
+
+# a board that only advertises hybrid+discrete (integrated bit clear)
+legacy = gpumux.decode(bytes([0] * 5 + [0x10, 0] + [0] * 13))
+check("gpu supported modes: no integrated bit → hybrid+discrete",
+      gpumux.supported_modes(legacy) == ["hybrid", "discrete"])
+
+# no new-switch flow → legacy pair only
+old = gpumux.decode(bytes([0] * 5 + [0x00, 0] + [0] * 13))
+check("gpu supported modes: legacy flow → hybrid+discrete",
+      gpumux.supported_modes(old) == ["hybrid", "discrete"])
+
+check("gpu mode aliases map to canonical modes",
+      gpumux.normalize_mode("dgpu") == "discrete"
+      and gpumux.normalize_mode("igpu") == "integrated"
+      and gpumux.normalize_mode("MSHybrid") == "hybrid")
+
+try:
+    gpumux.normalize_mode("vulkan")
+    check("gpu unknown mode rejected", False)
+except gpumux.GpuModeError:
+    check("gpu unknown mode rejected", True)
+
+# staging must only touch bits 0..1 of byte 5 and nothing else
+_payload = bytes([0x01, 0x01, 0x00, 0x06, 0x00, 0x30, 0x01] + [0xAB] * 13)
+for mode, want in (("hybrid", 0x30), ("discrete", 0x31), ("integrated", 0x32)):
+    staged = bytearray(_payload)
+    staged[gpumux.MODE_BYTE] = (staged[gpumux.MODE_BYTE] & ~0x03) | gpumux.MODE_VALUES[mode]
+    check(f"gpu staging {mode}: byte5 0x30 → 0x{want:02X}",
+          staged[gpumux.MODE_BYTE] == want
+          and staged[:5] == _payload[:5] and staged[6:] == _payload[6:])
+
+# dry run must never write: point the paths at a temp copy
+import tempfile as _tf  # noqa: E402
+_tmpdir = _tf.mkdtemp()
+_tmpvar = os.path.join(_tmpdir, "MsiDCVarData")
+with open(_tmpvar, "wb") as fh:
+    fh.write((0x00000007).to_bytes(4, "little")
+             + bytes([0x01, 0x01, 0x00, 0x06, 0x00, 0x30, 0x01] + [0] * 13))
+
+_orig_var_path = gpumux.VAR_PATH
+gpumux.VAR_PATH = _tmpvar
+try:
+    before_bytes = open(_tmpvar, "rb").read()
+    res = gpumux.set_mode("discrete", dry_run=True)
+    after_bytes = open(_tmpvar, "rb").read()
+    check("gpu dry run reports staged byte", res["byte5_staged"] == 0x31)
+    check("gpu dry run writes nothing", before_bytes == after_bytes)
+
+    # unsupported-mode guard: advertise no integrated bit
+    with open(_tmpvar, "wb") as fh:
+        fh.write((0x00000007).to_bytes(4, "little")
+                 + bytes([0x01, 0x01, 0x00, 0x06, 0x00, 0x10, 0x01] + [0] * 13))
+    try:
+        gpumux.set_mode("integrated", dry_run=True)
+        check("gpu unsupported mode refused", False)
+    except gpumux.GpuModeError as exc:
+        check("gpu unsupported mode refused", "not advertised" in str(exc))
+finally:
+    gpumux.VAR_PATH = _orig_var_path
+
 print(f"\nALL {CHECKS} CHECKS PASSED ✓")

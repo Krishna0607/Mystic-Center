@@ -214,6 +214,10 @@ def _dispatch_builder(ops: PrivOps):
             return ops.set_webcam(bool(args.get("on")))
         if op == "set_fn_switch":
             return ops.set_fn_switch(args["side"])
+        if op == "gpu_mode_state":
+            return ops.gpu_mode_state()
+        if op == "set_gpu_mode":
+            return ops.set_gpu_mode(args["mode"], bool(args.get("dry_run")))
         if op == "ec_dump":
             return ops.ec_dump(args.get("addrs"))
         raise KeyError(f"unknown op {op!r}")

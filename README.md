@@ -2,11 +2,11 @@
 
 One GTK4 app to replace MSI Center on your MSI laptop (Crosshair 16 HX D14VFKG,
 EC firmware `15P2EMS1.110`): system overview, performance modes, fan control,
-battery charge limits, and the full 24-zone RGB keyboard controller — all in one
-window.
+battery charge limits, the GPU MUX switch, and the full 24-zone RGB keyboard
+controller — all in one window.
 
 ```
-Overview · Performance · Fans · Battery · Lighting · Settings
+Overview · Performance · Fans · Battery · GPU · Lighting · Settings
 ```
 
 ## How it works
@@ -57,6 +57,7 @@ A [systemd](https://systemd.io/) Linux distribution (developed on
 | [`msi-ec` kernel driver](https://github.com/BeardOverflow/msi-ec) ([in-tree source](https://github.com/torvalds/linux/blob/master/drivers/platform/x86/msi-ec.c)) | `ls /sys/devices/platform/msi-ec` | platform modes, battery limits, fan modes, webcam/Fn switches |
 | [`msi_wmi_platform` + debugfs](https://github.com/torvalds/linux/blob/master/drivers/platform/x86/msi-wmi-platform.c) | `ls /sys/kernel/debug/msi-wmi-platform-*` | custom fan curves (WMI2 tables). If missing, everything except custom fan curves still works, and the app tells you why. |
 | [`ec_sys` write support](https://github.com/torvalds/linux/blob/master/drivers/acpi/ec_sys.c) | `cat /sys/module/ec_sys/parameters/write_support` → `Y` | advanced fan mode; installed by `install.sh --system` (a reboot may be needed once for the module to come up with `write_support=1`) |
+| [efivarfs](https://docs.kernel.org/filesystems/efivarfs.html) mounted | `mount \| grep efivarfs` | GPU MUX switching (`MsiDCVarData` variable); the GPU page reports "not available" when absent |
 | [`wheel` group](https://wiki.archlinux.org/title/Users_and_groups#Group_management) | `id -nG \| grep -w wheel` | the daemon accepts RPC from root and `wheel` members (default on Arch/Fedora; otherwise `sudo usermod -aG wheel $USER` + re-login) |
 | [hidraw](https://docs.kernel.org/hid/hidraw.html) access to the keyboard | `lsusb -d 1462:1603`, `ls /dev/hidraw*` | keyboard lighting; granted by the udev rule from `install.sh --system` |
 | [`nvidia-smi`](https://www.nvidia.com/en-us/drivers/unix/) (optional) | `nvidia-smi -L` | GPU temps/usage in the overview |
@@ -185,6 +186,9 @@ mystic-center wmi2                   # WMI platform interface inventory
 mystic-center battery --end 80 --start 60
 mystic-center webcam off             # WiFi-cam privacy toggle
 mystic-center fn-swap right          # Fn on the right side
+mystic-center gpu                    # GPU MUX state (MSHybrid/Discrete/Integrated)
+mystic-center gpu discrete           # stage dGPU mode + firmware handshake
+mystic-center gpu igpu --dry-run     # show the byte transition, write nothing
 mystic-center calibrate              # raw EC mode-code exploration (safe)
 mystic-center lighting steady FF7F20 # the full lighting CLI
 mystic-center lighting wave --rainbow --dir right --speed medium
@@ -209,6 +213,12 @@ mystic-center                        # GUI
   - curves are sanitized (monotonic ramp, 0–100 %) before they reach the
     firmware.
 - Charge limits are clamped (start ≤ end − 5, end ≤ 100).
+- **GPU MUX switching** writes the `MsiDCVarData` UEFI variable (only bits 0–1
+  of byte 5, attributes verified) and runs MSI Center's EC apply handshake
+  through the WMI platform interface. Every step is read back, a failed step
+  restores the previous target, and the app never reboots or powers off on its
+  own — the new mode applies on the next full power-on. See
+  [`docs/GPU-MUX-MAP.md`](docs/GPU-MUX-MAP.md).
 - If anything odd happens, a full laptop power-off (cold boot) restores the EC
   to factory defaults.
 
@@ -228,6 +238,11 @@ mystic-center                        # GUI
   conf both request it).
 - **Lighting not accessible** — the udev rule needs a re-login or
   `sudo ./install.sh --system` again after per-session ACLs change.
+- **GPU page says "not available"** — this machine has no `MsiDCVarData`
+  variable, i.e. no switchable MUX. Nothing else is affected.
+- **GPU mode staged but nothing changed** — the firmware applies it on the
+  next power-on: shut down completely and start again (a warm reboot is not
+  enough). `mystic-center gpu` shows `reboot pending` until then.
 
 ## Status of features
 
@@ -240,6 +255,7 @@ mystic-center                        # GUI
 | Custom fan curves | ✅ **live-validated** (2026-10-18) — MSI-Center parity via `msi_wmi_platform` (WMI2 tables); AP-bit round-trip exact (`0x0D`↔`0x8D`), every write readback-verified, duty tables drive real RPM (CPU 2962→4137, GPU 0→2981), clean restore to firmware auto; `sudo tools/wmi2_probe.py --write-test` remains for first-contact checks on fresh machines |
 | Battery charge-limit sliders | ✅ kernel interface; values verified |
 | 24-zone RGB keyboard | ✅ full MSI-Center parity set (wave, dance, wheel, bouncy ball, Customize, all-sync, Save/Revert to MCU) — live-verified on hardware incl. wave parameter sweep and both directions (2026-10-18); packet-level parity tests passing |
+| GPU MUX switch (MSHybrid / Discrete / Integrated) | ✅ MSI-Center parity — UEFI `MsiDCVarData` byte 5 + EC apply handshake (`0xD1` trigger → apply-ready → `0xBE 0x02` ack), capability-gated, readback-verified, rollback on failure; all three modes advertised by this unit's firmware |
 | Webcam / Fn-side swap | ✅ via msi-ec |
 | Autostart + packaging | ✅ systemd service + .desktop |
 

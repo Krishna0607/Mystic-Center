@@ -8,6 +8,12 @@ import sys
 
 from . import client as daemon_client
 
+MODE_LABELS = {
+    "hybrid": "MSHybrid",
+    "discrete": "Discrete",
+    "integrated": "Integrated",
+}
+
 
 def _snap_text(snap: dict) -> str:
     cpu, gpu = snap.get("cpu", {}), snap.get("gpu", {})
@@ -99,6 +105,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("side", choices=["left", "right"])
 
     sub.add_parser("calibrate", help="probe raw EC shift-mode codes")
+    sp = sub.add_parser("gpu", help="GPU MUX: hybrid | discrete | integrated")
+    sp.add_argument("mode", nargs="?", default=None,
+                    choices=["hybrid", "mshybrid", "discrete", "integrated",
+                             "dgpu", "igpu"])
+    sp.add_argument("--dry-run", action="store_true",
+                    help="show what would be written, change nothing")
+    sp.add_argument("--json", action="store_true", help="raw JSON output")
     sub.add_parser("wmi2", help="inspect the MSI WMI platform interface")
     sub.add_parser("gui", help="open the dashboard")
 
@@ -131,6 +144,50 @@ def curve_text(curve):
     if not curve:
         return "—"
     return " ".join(f"{t:d}:{d:d}" for t, d in curve)
+
+
+def _run_gpu(c, args) -> int:
+    """`mystic-center gpu [hybrid|discrete|integrated]` — MSI Center's GPU switch."""
+    if not args.mode:
+        st = c.request("gpu_mode_state")
+        if args.json:
+            print(json.dumps(st, indent=2))
+            return 0
+        if not st.get("available"):
+            print("GPU MUX: not available on this machine", file=sys.stderr)
+            return 1
+        cur = st.get("current")
+        tgt = st.get("target")
+        print(f"current mode : {MODE_LABELS.get(cur, cur)}")
+        print(f"target mode  : {MODE_LABELS.get(tgt, tgt)}"
+              + ("   (reboot pending)" if st.get("reboot_pending") else ""))
+        print(f"supported    : "
+              + ", ".join(MODE_LABELS[m] for m in st.get("supported", [])))
+        if st.get("mux_ec") is not None:
+            print(f"EC mux 0x2E  : 0x{st['mux_ec']:02X}"
+                  f" (PXCT={'discrete' if st['mux_ec'] & 0x40 else 'hybrid'})")
+        for g in st.get("gpus", []):
+            print(f"GPU          : {g['pci']} {g['vendor']}:{g['device']}"
+                  f" driver={g['driver']}")
+        if st.get("ap_error"):
+            print(f"WMI AP       : {st['ap_error']}")
+        return 0
+
+    res = c.request("set_gpu_mode", mode=args.mode,
+                    dry_run=bool(args.dry_run))
+    if args.json:
+        print(json.dumps(res, indent=2))
+        return 0
+    if res.get("dry_run"):
+        print(f"dry run: {MODE_LABELS[res['mode']]} — byte5 "
+              f"0x{res['byte5_before']:02X} → 0x{res['byte5_staged']:02X}")
+        print("nothing was written")
+        return 0
+    print(f"{MODE_LABELS[res['mode']]} mode staged and the firmware apply "
+          "handshake succeeded.")
+    print("Save your work and perform a FULL SHUTDOWN (power off, not reboot),")
+    print("then power on again. A reboot alone does not apply the MUX change.")
+    return 0
 
 
 def _run_fan_curve(c, args) -> int:
@@ -257,6 +314,8 @@ def run(argv: list[str]) -> int:
             if args.cmd == "calibrate":
                 print(json.dumps(c.request("calibrate_shift_mode"), indent=2))
                 return 0
+            if args.cmd == "gpu":
+                return _run_gpu(c, args)
     except daemon_client.DaemonDown as e:
         print(f"error: {e}", file=sys.stderr)
         print("hint: systemctl start mystic-center (or install: ./install.sh --system)",

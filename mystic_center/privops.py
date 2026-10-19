@@ -7,7 +7,7 @@ import logging
 import os
 import time
 
-from . import battery, msiec, sensors
+from . import battery, gpumux, msiec, sensors
 from .ecio import ALLOWED, EC, ECError
 from .powersaver import PowerSaver
 from . import wmi2
@@ -106,8 +106,22 @@ class PrivOps:
             },
             "system_temps": sensors.system_temps(),
             "modes": self.modes(),
+            "gpu_mode": self._gpu_mode_summary(),
             "fw": msiec.fw(),
         }
+
+    def _gpu_mode_summary(self) -> dict:
+        """Cheap MUX summary for snapshots (no WMI calls, no EC writes)."""
+        if not gpumux.available():
+            return {"available": False}
+        try:
+            info = gpumux.decode(gpumux._read_var()[1])
+        except (gpumux.GpuModeError, OSError) as exc:
+            return {"available": False, "error": str(exc)}
+        info["available"] = True
+        info["supported"] = gpumux.supported_modes(info)
+        info["mux_ec"] = gpumux._read_ec_byte(gpumux.EC_MUX_REG)
+        return info
 
     def modes(self) -> dict:
         sm = msiec.shift_mode()
@@ -194,6 +208,31 @@ class PrivOps:
     def set_super_battery(self, on: bool) -> dict:
         ok = msiec.set_super_battery(bool(on))
         return {"set": bool(on), "ok": ok, "now": msiec.super_battery()}
+
+    # ---- GPU MUX ----------------------------------------------------------------
+
+    def gpu_mode_state(self) -> dict:
+        """Read-only GPU MUX state (UEFI variable + EC mirror + GPUs)."""
+        if not gpumux.available():
+            return {"available": False}
+        state = gpumux.read_state()
+        state["available"] = True
+        try:
+            state["ap"] = gpumux.ap_state()
+        except (gpumux.GpuModeError, OSError) as exc:
+            state["ap_error"] = str(exc)
+        return state
+
+    def set_gpu_mode(self, mode: str, dry_run: bool = False) -> dict:
+        """Stage a GPU mode and run MSI Center's firmware apply handshake.
+
+        The daemon is the only writer: efivarfs and the WMI debugfs methods
+        are root-only, exactly like the fan-curve path.
+        """
+        if not gpumux.available():
+            raise gpumux.GpuModeError(
+                "no switchable MUX on this machine (MsiDCVarData missing)")
+        return gpumux.set_mode(mode, dry_run=bool(dry_run))
 
     # ---- fans ------------------------------------------------------------------
 
