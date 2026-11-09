@@ -1,11 +1,12 @@
 [Desktop Entry]
 Type=Application
 Name=Mystic Center
-Comment=MSI laptop control center: overview, performance, fans, battery, RGB
+GenericName=MSI Laptop Control Center
+Comment=Premium control center for MSI laptops — GPU MUX, performance, fans, battery, RGB
 Exec=__APP_BIN__
 Icon=mystic-center
 Terminal=false
-Categories=Utility;
-Keywords=msi;mystic;fan;battery;rgb;lighting;
+Categories=System;
+Keywords=msi;mystic;control;center;gpu;mux;hybrid;discrete;integrated;fan;battery;rgb;lighting;thermal;performance;
 StartupNotify=true
 StartupWMClass=org.mysticcenter.Center

@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import shutil
 import threading
+import time
 
 import gi
 
@@ -20,6 +21,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
 from . import client as daemon_client
+from . import theme
 from . import wmi2
 from .lighting import profiles as prof
 from .lighting import effects
@@ -129,16 +131,30 @@ def perf_mode_name(mode: str | None) -> str:
 class Page(Gtk.ScrolledWindow):
     """Base page: horizontally clamped content + daemon-reachability hook."""
 
-    def __init__(self, window: "CenterWindow", icon: str):
+    def __init__(self, window: "CenterWindow", icon: str,
+                 title: str = "", subtitle: str = ""):
         super().__init__(vexpand=True)
         self.window = window
         self.icon_name = icon
-        self.clamp = Adw.Clamp(maximum_size=1160, tightening_threshold=980)
+        self.page_title = title
+        self.page_subtitle = subtitle
+        self.add_css_class("mc-content")
+        self.clamp = Adw.Clamp(maximum_size=1180, tightening_threshold=1000)
         self.set_child(self.clamp)
-        self.col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        self.col.set_margin_top(12)
-        self.col.set_margin_bottom(24)
+        self.col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        self.col.set_margin_top(18)
+        self.col.set_margin_bottom(30)
+        self.col.set_margin_start(6)
+        self.col.set_margin_end(6)
         self.clamp.set_child(self.col)
+        if title:
+            self.col.append(theme.section(title, subtitle or None))
+            self.header = self.col.get_first_child()
+        else:
+            self.header = None
+
+    def add(self, widget: Gtk.Widget) -> None:
+        self.col.append(widget)
 
     def refresh(self, snap: dict) -> None:  # pragma: no cover - overridden
         ...
@@ -153,251 +169,534 @@ def _mk_row(title: str = "", subtitle: str = "") -> Adw.ActionRow:
     return Adw.ActionRow(title=title, subtitle=subtitle)
 
 
+def _dmi(name: str) -> str:
+    try:
+        with open(f"/sys/class/dmi/id/{name}") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+MACHINE_NAME = _dmi("product_name") or "MSI Laptop"
+MACHINE_BOARD = _dmi("board_name") or ""
+MACHINE_BIOS = _dmi("bios_version") or ""
+
+
+def _temp_tone(value) -> str | None:
+    if value is None:
+        return None
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    if v >= 88:
+        return "err"
+    if v >= 76:
+        return "warn"
+    return "ok"
+
+
 class OverviewPage(Page):
+    """Control-center dashboard: live telemetry, quick controls, GPU state."""
+
     def __init__(self, window):
-        super().__init__(window, "computer-symbolic")
+        super().__init__(
+            window, "view-grid-symbolic", "Dashboard",
+            "Live telemetry and the controls you reach for most")
 
-        self.bars: dict[str, tuple[Gtk.LevelBar, Gtk.Label, Gtk.Label, float, float]] = {}
+        # ---- alerts (hidden unless something needs attention) -------------
+        self.alert_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
+                                 spacing=10)
+        self.col.append(self.alert_box)
 
-        def add_temp_row(title: str, group: Adw.PreferencesGroup, lo=30.0, hi=95.0):
-            row = Adw.ActionRow(title=title)
-            value = Gtk.Label(label="—")
-            value.add_css_class("monospace")
-            value.add_css_class("heading")
-            value.set_xalign(1.0)
-            row.add_suffix(value)
-            bar = Gtk.LevelBar(min_value=lo, max_value=hi)
-            bar.set_size_request(110, 6)
-            bar.set_valign(Gtk.Align.CENTER)
-            row.add_suffix(bar)
-            group.add(row)
-            self.bars[title] = (bar, value, row, lo, hi)
+        self.gpu_alert = theme.banner(
+            "Restart required", "A graphics-mode change is staged",
+            "warn", "system-reboot-symbolic")
+        review = Gtk.Button(label="Review")
+        review.add_css_class("mc-ghost")
+        review.set_valign(Gtk.Align.CENTER)
+        review.connect("clicked", lambda *_: self.window.show_page("gpu"))
+        self.gpu_alert.append(review)
+        self.gpu_alert.set_visible(False)
+        self.alert_box.append(self.gpu_alert)
 
-        g_temp = Adw.PreferencesGroup(title="Temperatures")
-        self.col.append(g_temp)
-        for t in ("CPU", "GPU"):
-            add_temp_row(t, g_temp)
+        self.fail_alert = theme.banner(
+            "The last graphics-mode switch did not apply",
+            "Shut down completely, then power on again",
+            "err", "dialog-warning-symbolic")
+        fix = Gtk.Button(label="Fix")
+        fix.add_css_class("mc-ghost")
+        fix.set_valign(Gtk.Align.CENTER)
+        fix.connect("clicked", lambda *_: self.window.show_page("gpu"))
+        self.fail_alert.append(fix)
+        self.fail_alert.set_visible(False)
+        self.alert_box.append(self.fail_alert)
 
-        g_fan = Adw.PreferencesGroup(title="Fans")
-        self.col.append(g_fan)
-        self.rpm_row = _mk_row("Fan speed", "read via msi_wmi_platform hwmon")
-        self.rpm_label = Gtk.Label(label="—")
-        self.rpm_label.add_css_class("monospace")
-        self.rpm_row.add_suffix(self.rpm_label)
-        g_fan.add(self.rpm_row)
+        # ---- hero ----------------------------------------------------------
+        hero = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=28)
+        hero.add_css_class("mc-hero")
+        self.col.append(hero)
 
-        self.duty_row = _mk_row("Fan duty (CPU / GPU)", "feedback from EC")
-        self.duty_label = Gtk.Label(label="—")
-        self.duty_label.add_css_class("monospace")
-        self.duty_row.add_suffix(self.duty_label)
-        g_fan.add(self.duty_row)
+        left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        left.set_hexpand(True)
+        hero.append(left)
 
-        g_mem = Adw.PreferencesGroup(title="Memory and storage")
-        self.col.append(g_mem)
+        left.append(theme.label("SYSTEM STATUS", "mc-hero-eyebrow"))
+        left.append(theme.label(MACHINE_NAME, "mc-hero-title"))
+        ident = " · ".join(x for x in (MACHINE_BOARD, MACHINE_BIOS) if x)
+        left.append(theme.label(ident or "MSI laptop", "mc-hero-sub"))
 
-        def add_meter_row(title: str, group: Adw.PreferencesGroup):
-            row = Adw.ActionRow(title=title)
-            value = Gtk.Label(label="—")
-            value.add_css_class("monospace")
-            value.add_css_class("heading")
-            value.set_xalign(1.0)
-            row.add_suffix(value)
-            bar = Gtk.LevelBar(min_value=0, max_value=100)
-            bar.set_size_request(110, 6)
-            bar.set_valign(Gtk.Align.CENTER)
-            row.add_suffix(bar)
-            group.add(row)
-            return bar, value
+        self.hero_badges = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                                   spacing=8)
+        self.hero_badges.set_margin_top(4)
+        self.badge_perf = theme.Badge("—", "muted")
+        self.badge_fan = theme.Badge("fan —", "muted")
+        self.badge_gpu = theme.Badge("GPU —", "muted")
+        self.badge_saver = theme.Badge("Battery saver", "ok")
+        for b in (self.badge_perf, self.badge_fan, self.badge_gpu,
+                  self.badge_saver):
+            self.hero_badges.append(b)
+        self.badge_saver.set_visible(False)
+        left.append(self.hero_badges)
 
-        self.ram_bar, self.ram_value = add_meter_row("RAM", g_mem)
-        self.disk_bar, self.disk_value = add_meter_row("Storage", g_mem)
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        actions.set_margin_top(10)
+        perf_btn = Gtk.Button(label="Performance")
+        perf_btn.add_css_class("mc-ghost")
+        perf_btn.connect("clicked", lambda *_: self.window.show_page("perf"))
+        gpu_btn = Gtk.Button(label="Graphics mode")
+        gpu_btn.add_css_class("mc-primary")
+        gpu_btn.connect("clicked", lambda *_: self.window.show_page("gpu"))
+        actions.append(perf_btn)
+        actions.append(gpu_btn)
+        left.append(actions)
 
-        g_bat = Adw.PreferencesGroup(title="Battery")
-        self.col.append(g_bat)
-        self.bat_row = _mk_row("Charge")
-        self.bat_label = Gtk.Label(label="—")
-        self.bat_label.add_css_class("monospace")
-        self.bat_row.add_suffix(self.bat_label)
-        g_bat.add(self.bat_row)
+        right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        right.set_size_request(230, -1)
+        right.set_valign(Gtk.Align.CENTER)
+        hero.append(right)
+        right.append(theme.label("BATTERY", "mc-stat-label"))
+        self.bat_big = theme.label("—", "mc-hero-big")
+        right.append(self.bat_big)
+        self.bat_meter = Gtk.LevelBar(min_value=0.0, max_value=1.0)
+        self.bat_meter.add_css_class("mc-meter")
+        self.bat_meter.set_size_request(-1, 8)
+        right.append(self.bat_meter)
+        self.bat_caption = theme.label("—", "mc-hero-sub")
+        right.append(self.bat_caption)
 
-        self.power_row = _mk_row("Now / voltage", "battery current draw")
-        self.power_label = Gtk.Label(label="—")
-        self.power_label.add_css_class("monospace")
-        self.power_row.add_suffix(self.power_label)
-        g_bat.add(self.power_row)
+        # ---- telemetry tiles ----------------------------------------------
+        grid = Gtk.Grid(column_homogeneous=True, column_spacing=14,
+                        row_spacing=14)
+        self.col.append(grid)
+        self.tile_cpu = theme.StatTile("weather-clear-symbolic", "CPU")
+        self.tile_gpu = theme.StatTile("video-display-symbolic", "GPU")
+        self.tile_fan = theme.StatTile("weather-windy-symbolic", "Fans")
+        self.tile_ram = theme.StatTile("drive-harddisk-symbolic", "Memory")
+        for i, tile in enumerate((self.tile_cpu, self.tile_gpu,
+                                  self.tile_fan, self.tile_ram)):
+            grid.attach(tile, i, 0, 1, 1)
 
-        self.limit_row = _mk_row("Charge limit (start / end)")
-        self.limit_label = Gtk.Label(label="—")
-        self.limit_label.add_css_class("monospace")
-        self.limit_row.add_suffix(self.limit_label)
-        g_bat.add(self.limit_row)
+        # ---- quick controls ------------------------------------------------
+        quick = theme.card(
+            "Quick controls", "One tap, straight to the embedded controller",
+            "preferences-system-symbolic")
+        self.col.append(quick)
+        body = quick.body
 
-        g_mode = Adw.PreferencesGroup(title="Mode")
-        self.mode_label = Gtk.Label(label="—")
-        self.mode_label.add_css_class("monospace")
-        mode_row = _mk_row("System / fan mode")
-        mode_row.add_suffix(self.mode_label)
-        g_mode.add(mode_row)
+        perf_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        perf_row.append(theme.icon("power-profile-performance-symbolic", 18,
+                                   "mc-card-icon"))
+        perf_text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        perf_text.append(theme.label("Platform profile", "mc-card-title"))
+        perf_text.append(theme.label("Eco · Balanced · Performance",
+                                     "mc-card-sub"))
+        perf_row.append(perf_text)
+        spacer = Gtk.Box()
+        spacer.set_hexpand(True)
+        perf_row.append(spacer)
+        self.perf_btns = SegButtons(
+            [("eco", "Eco"), ("comfort", "Balanced"), ("turbo", "Turbo")],
+            self.on_perf)
+        self.perf_btns.add_css_class("mc-seg")
+        self.perf_btns.set_valign(Gtk.Align.CENTER)
+        perf_row.append(self.perf_btns)
+        body.append(perf_row)
+        body.append(self._sep())
 
-        self.fw_row = _mk_row("EC firmware")
-        fw_label = Gtk.Label(label="—")
-        fw_label.add_css_class("monospace")
-        self.fw_row.add_suffix(fw_label)
-        g_mode.add(self.fw_row)
+        self.sw_cooler = self._switch_row(
+            body, "power-profile-performance-symbolic", "Cooler Boost",
+            "Both fans to 100 % for the fastest heat dump", self.on_cooler)
+        body.append(self._sep())
+        self.sw_saver = self._switch_row(
+            body, "night-light-symbolic", "Super Battery Saver",
+            "Eco profile · silent fans · CPU capped at 2.0 GHz", self.on_saver)
+        body.append(self._sep())
+        self.sw_webcam = self._switch_row(
+            body, "camera-web-symbolic", "Webcam",
+            "Hardware kill switch for the camera", self.on_webcam)
+
+        # ---- graphics card -------------------------------------------------
+        gpu_card = theme.card(
+            "Graphics", "Firmware MUX — MSHybrid, Discrete or Integrated",
+            "video-display-symbolic")
+        self.col.append(gpu_card)
+        gbody = gpu_card.body
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        self.gpu_now = theme.label("—", "mc-card-title")
+        row.append(self.gpu_now)
+        self.gpu_badge = theme.Badge("—", "muted")
+        row.append(self.gpu_badge)
+        spacer = Gtk.Box()
+        spacer.set_hexpand(True)
+        row.append(spacer)
+        manage = Gtk.Button(label="Manage")
+        manage.add_css_class("mc-ghost")
+        manage.set_valign(Gtk.Align.CENTER)
+        manage.connect("clicked", lambda *_: self.window.show_page("gpu"))
+        row.append(manage)
+        gbody.append(row)
+        self.gpu_caption = theme.label("", "mc-card-sub", wrap=True)
+        gbody.append(self.gpu_caption)
+
+        # ---- system details ------------------------------------------------
+        info = theme.card("System", "Firmware and machine identity",
+                          "emblem-system-symbolic")
+        self.col.append(info)
+        self.kv = {}
+        for key, val in (("Board", MACHINE_BOARD or "—"),
+                         ("BIOS", MACHINE_BIOS or "—"),
+                         ("EC firmware", "—"),
+                         ("Linux kernel", os.uname().release)):
+            row, value = theme.key_value(key, val)
+            info.body.append(row)
+            self.kv[key] = value
+
+        self._snap = {}
+
+    # ---- small helpers -----------------------------------------------------
+
+    @staticmethod
+    def _sep() -> Gtk.Box:
+        sep = Gtk.Box()
+        sep.add_css_class("mc-sep")
+        sep.set_margin_top(2)
+        sep.set_margin_bottom(2)
+        return sep
+
+    def _switch_row(self, body: Gtk.Box, icon_name: str, title: str,
+                    subtitle: str, handler) -> Gtk.Switch:
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        row.append(theme.icon(icon_name, 18, "mc-card-icon"))
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        text.append(theme.label(title, "mc-card-title"))
+        text.append(theme.label(subtitle, "mc-card-sub", wrap=True))
+        row.append(text)
+        spacer = Gtk.Box()
+        spacer.set_hexpand(True)
+        row.append(spacer)
+        sw = Gtk.Switch()
+        sw.set_valign(Gtk.Align.CENTER)
+        sw.connect("notify::active", handler)
+        row.append(sw)
+        body.append(row)
+        return sw
+
+    # ---- actions -----------------------------------------------------------
+
+    def on_perf(self, key: str) -> None:
+        try:
+            with daemon_client.Client() as c:
+                c.request("set_shift_mode", mode=key)
+        except (daemon_client.DaemonDown, RuntimeError) as e:
+            self.window.toast(f"profile switch failed: {e}")
+
+    def on_cooler(self, sw, *_a):
+        self._toggle(sw, "set_cooler_boost", "cooler boost")
+
+    def on_saver(self, sw, *_a):
+        self._toggle(sw, "set_super_saver", "super saver")
+
+    def on_webcam(self, sw, *_a):
+        self._toggle(sw, "set_webcam", "webcam")
+
+    def _toggle(self, sw, op: str, what: str) -> None:
+        if getattr(sw, "_mc_sync", False):
+            return
+        try:
+            with daemon_client.Client() as c:
+                c.request(op, on=sw.get_active())
+        except (daemon_client.DaemonDown, RuntimeError) as e:
+            self.window.toast(f"{what} failed: {e}")
+            sw._mc_sync = True
+            try:
+                sw.set_active(not sw.get_active())
+            finally:
+                sw._mc_sync = False
+
+    # ---- refresh -----------------------------------------------------------
+
+    @staticmethod
+    def _sync_switch(sw: Gtk.Switch, value: bool) -> None:
+        if bool(value) == sw.get_active():
+            return
+        sw._mc_sync = True
+        try:
+            sw.set_active(bool(value))
+        finally:
+            sw._mc_sync = False
 
     def refresh(self, snap: dict) -> None:
+        self._snap = snap
         cpu = snap.get("cpu") or {}
         gpu = snap.get("gpu") or {}
         fans = snap.get("fans") or {}
         bat = snap.get("battery") or {}
-        temps = snap.get("system_temps") or {}
         system = snap.get("system") or {}
+        modes = snap.get("modes") or {}
+        gmode = snap.get("gpu_mode") or {}
 
-        def setbar(title, value, fmt_suffix="°C"):
-            bar, value_label, _row, lo, hi = self.bars[title]
-            if value is None:
-                value_label.set_label("—")
-                bar.set_value(0)
-                return
-            value_label.set_label(fmt(value, fmt_suffix))
-            bar.set_value(float(value) - lo)
-
-        setbar("CPU", cpu.get("temp"))
-        setbar("GPU", gpu.get("temp"))
-
-        def meter(bar, label, data):
-            if not data:
-                label.set_label("—")
-                bar.set_value(0)
-                return
-            label.set_label(
-                f"{data.get('used_gb', '—')} / {data.get('total_gb', '—')} GB "
-                f"({fmt(data.get('pct'), '%')})")
-            bar.set_value(float(data.get("pct") or 0))
-
-        meter(self.ram_bar, self.ram_value, system.get("ram"))
-        meter(self.disk_bar, self.disk_value, system.get("storage"))
-
-        rpm = fans.get("rpm")
-        self.rpm_label.set_label(
-            f"{rpm} RPM" if isinstance(rpm, int) else "—")
-        duty = fans.get("duty") or {}
-        if duty:
-            self.duty_label.set_label(
-                f"{duty.get('cpu', '—')}% / {duty.get('gpu', '—')}%")
+        shift = (modes.get("shift") or "").split(" ")[0].lower()
+        perf_tone = {"eco": "ok", "comfort": "accent",
+                     "turbo": "warn"}.get(shift, "muted")
+        self.badge_perf.update(perf_mode_name(modes.get("shift")), perf_tone)
+        self.badge_fan.update(f"fan {modes.get('fan') or 'auto'}", "muted")
+        if gmode.get("available"):
+            cur = gmode.get("current") or gmode.get("target")
+            self.badge_gpu.update(GPU_MODE_INFO.get(cur, (cur,))[0],
+                                  "warn" if gmode.get("restart_required")
+                                  else "accent")
         else:
-            cpu_pct = cpu.get("fan_pct")
-            self.duty_label.set_label(
-                f"{fmt(cpu_pct, '%')}" if cpu_pct is not None else "—")
+            self.badge_gpu.update("GPU —", "muted")
+        self.badge_saver.set_visible(bool(modes.get("super_saver")))
+        self.perf_btns.select(shift if shift in self.perf_btns.buttons
+                              else "comfort")
+        self._sync_switch(self.sw_cooler, bool(modes.get("cooler_boost")))
+        self._sync_switch(self.sw_saver, bool(modes.get("super_saver")))
+        self._sync_switch(self.sw_webcam, bool(modes.get("webcam")))
 
         percent = bat.get("percent")
-        status = bat.get("status", "")
-        glyph = {"Charging": "▲", "Discharging": "▼", "Not charging": "■",
-                 "Full": "●"}.get(status, "")
-        self.bat_label.set_label(
-            f"{glyph} {percent}%  {status}".strip() if percent is not None else "—")
-        pw = bat.get("power_w")
-        volt = bat.get("voltage")
-        cur = bat.get("current")
-        self.power_label.set_label(
-            f"{fmt(pw, ' W')}  {fmt(volt, ' V', 2)}  {fmt(cur, ' A', 2)}"
-            if pw is not None else "—")
-        st, end = bat.get("start_threshold"), bat.get("end_threshold")
-        self.limit_label.set_label(
-            f"{st} / {end}" if st is not None and end is not None else "—")
+        if percent is not None:
+            self.bat_big.set_label(f"{percent}%")
+            self.bat_meter.set_value(float(percent) / 100.0)
+            status = bat.get("status") or ""
+            pw = bat.get("power_w")
+            self.bat_caption.set_label(
+                f"{status or 'idle'}" + (f" · {fmt(pw, ' W')}"
+                                         if pw is not None else ""))
+        else:
+            self.bat_big.set_label("—")
+            self.bat_caption.set_label("no battery node")
 
-        modes = snap.get("modes") or {}
-        saver = " · 🌙 super saver" if modes.get("super_saver") else ""
-        self.mode_label.set_label(
-            f"{perf_mode_name(modes.get('shift'))} · fan {modes.get('fan', '—')}"
-            + (" · cooler boost" if modes.get("cooler_boost") else "") + saver)
-        self.fw_row.set_subtitle(fw(snap.get("fw") or {}))
+        self.tile_cpu.update(
+            fmt(cpu.get("temp"), "°C"),
+            f"fan {fmt(cpu.get('fan_pct'), '%')}",
+            None if cpu.get("temp") is None
+            else (float(cpu["temp"]) - 30) / 70,
+            _temp_tone(cpu.get("temp")))
+        self.tile_gpu.update(
+            fmt(gpu.get("temp"), "°C"),
+            f"{fmt(gpu.get('util'), '%')} load · {fmt(gpu.get('power_w'), ' W')}",
+            None if gpu.get("temp") is None
+            else (float(gpu["temp"]) - 30) / 70,
+            _temp_tone(gpu.get("temp")))
+        rpm = fans.get("rpm")
+        duty = fans.get("duty") or {}
+        self.tile_fan.update(
+            f"{rpm}" if isinstance(rpm, int) else "—",
+            (f"{duty.get('cpu', '—')}% / {duty.get('gpu', '—')}% duty"
+             if duty else "EC telemetry"),
+            None if not isinstance(rpm, int) else min(1.0, rpm / 6000.0))
+        ram = system.get("ram") or {}
+        self.tile_ram.update(
+            fmt(ram.get("pct"), "%"),
+            f"{ram.get('used_gb', '—')} / {ram.get('total_gb', '—')} GB",
+            None if ram.get("pct") is None else float(ram["pct"]) / 100.0,
+            "warn" if (ram.get("pct") or 0) >= 85 else "ok")
 
-    def reachability(self, ok, why):
-        if not ok:
-            self.rpm_label.set_label("daemon down")
+        if gmode.get("available"):
+            cur = gmode.get("current")
+            tgt = gmode.get("target")
+            self.gpu_now.set_label(
+                GPU_MODE_INFO.get(cur, (cur,))[0] if cur else "Unknown")
+            if gmode.get("apply_failed"):
+                self.gpu_badge.update("switch failed", "err")
+            elif gmode.get("restart_required"):
+                self.gpu_badge.update("restart required", "warn")
+            elif gmode.get("current_source") == "runtime":
+                self.gpu_badge.update("live", "ok")
+            else:
+                self.gpu_badge.update("active", "ok")
+            rt = (gmode.get("runtime") or {}).get("mode")
+            parts = [GPU_MODE_INFO.get(cur, (cur,))[1] if cur else ""]
+            if tgt and tgt != cur:
+                parts.append(f"{GPU_MODE_INFO.get(tgt, (tgt,))[0]} staged for "
+                             "next power-on")
+            if rt:
+                parts.append(
+                    f"live topology: {GPU_MODE_INFO.get(rt, (rt,))[0]}")
+            self.gpu_caption.set_label(" · ".join(p for p in parts if p))
+        else:
+            self.gpu_now.set_label("No switchable MUX")
+            self.gpu_badge.update("unavailable", "muted")
+            self.gpu_caption.set_label(
+                "This machine does not expose a firmware graphics switch.")
 
+        self.gpu_alert.set_visible(bool(gmode.get("restart_required")
+                                        and not gmode.get("apply_failed")))
+        if gmode.get("restart_required"):
+            tgt = gmode.get("target")
+            self.gpu_alert.title_label.set_label("Restart required")
+            self.gpu_alert.subtitle_label.set_label(
+                f"{GPU_MODE_INFO.get(tgt, (tgt,))[0]} is staged — restart to "
+                "finish the graphics-mode switch")
+        self.fail_alert.set_visible(bool(gmode.get("apply_failed")))
+        if gmode.get("apply_failed"):
+            req = gmode.get("requested")
+            self.fail_alert.subtitle_label.set_label(
+                f"Requested {GPU_MODE_INFO.get(req, (req,))[0]}, but the "
+                "machine is still running the previous mode. A warm reboot "
+                "does not re-run the MUX POST step — shut down fully, then "
+                "power on.")
 
-def fw(fw_dict) -> str:
-    return f"{fw_dict.get('version', '—')} ({fw_dict.get('released', '')})"
+        if snap.get("fw"):
+            self.kv["EC firmware"].set_label(fw(snap["fw"]))
 
 
 # ============================================================== performance
 
+PERF_INFO = {
+    "eco": ("Battery Saver", "Lowest power draw — best for unplugged work",
+            "battery-good-symbolic"),
+    "comfort": ("Balanced", "Everyday profile — quiet with headroom", "power-profile-balanced-symbolic"),
+    "turbo": ("Performance", "Maximum sustained clocks for gaming", "power-profile-performance-symbolic"),
+}
+
+
 class PerfPage(Page):
     def __init__(self, window):
-        super().__init__(window, "power-profile-performance-symbolic")
+        super().__init__(
+            window, "power-profile-performance-symbolic", "Performance",
+            "Platform profile and the power features behind it")
 
-        g = Adw.PreferencesGroup(
-            title="Platform profile (EC shift mode)")
-        self.col.append(g)
-        row = Adw.ActionRow(title="Mode",
-                            subtitle="Eco saves power · Comfort balanced · Turbo peaks")
-        self.mode_btns = SegButtons(
-            [("eco", "Battery Saver"), ("comfort", "Balanced"),
-             ("turbo", "Performance")],
-            self.on_mode)
-        self.mode_btns.select("comfort")  # placeholder until first snapshot
-        self.mode_btns.set_valign(Gtk.Align.CENTER)
-        row.add_suffix(self.mode_btns)
-        g.add(row)
+        self.col.append(theme.subsection(
+            "Platform profile",
+            "EC shift mode — changes clocks, fan curves and power limits together"))
 
-        self.cooler_row = Adw.SwitchRow(
-            title="Cooler Boost",
-            subtitle="Max fan rotation momentarily (fans at 100 %)")
-        g.add(self.cooler_row)
-        self.cooler_row.connect("notify::active", self.on_cooler)
+        grid = Gtk.Grid(column_homogeneous=True, column_spacing=14)
+        self.col.append(grid)
+        self.mode_cards = {}
+        for i, key in enumerate(("eco", "comfort", "turbo")):
+            name, desc, ico = PERF_INFO[key]
+            cardw = theme.ModeCard(key, name, desc, ico)
+            cardw.connect("toggled", self._on_card, key)
+            grid.attach(cardw, i, 0, 1, 1)
+            self.mode_cards[key] = cardw
 
-        self.sbat_row = Adw.SwitchRow(
-            title="Super Battery (EC power plane)",
-            subtitle="Limits one power plane for extra runtime")
-        g.add(self.sbat_row)
-        self.sbat_row.connect("notify::active", self.on_super_battery)
+        card = theme.card("Power features",
+                          "Toggle hardware directly on the embedded controller",
+                          "preferences-system-symbolic")
+        self.col.append(card)
+        body = card.body
 
-        self.saver_row = Adw.SwitchRow(
-            title="🌙  Super Battery Saver",
-            subtitle="Battery Saver mode · power-plane limit · silent fans · "
-                     "CPU capped at 2.0 GHz — maximum runtime, reduced power")
-        g.add(self.saver_row)
-        self.saver_row.connect("notify::active", self.on_saver)
+        self.cooler_row = self._switch_row(
+            body, "power-profile-performance-symbolic", "Cooler Boost",
+            "Both fans to maximum — instant heat dump", self.on_cooler)
+        body.append(self._sep())
+        self.sbat_row = self._switch_row(
+            body, "battery-symbolic", "Super Battery (EC power plane)",
+            "Limits one power plane for extra runtime", self.on_super_battery)
+        body.append(self._sep())
+        self.saver_row = self._switch_row(
+            body, "night-light-symbolic", "Super Battery Saver",
+            "Battery Saver profile · power-plane limit · silent fans · "
+            "CPU capped at 2.0 GHz", self.on_saver)
 
-        self.cal_row = Adw.ActionRow(
-            title="Turbo code calibration",
-            subtitle="Writes each mode and reads back raw EC values "
-                     "(needed once on boards reporting turbo as 0xC0)")
-        cal_btn = Gtk.Button(label="Run")
-        cal_btn.set_valign(Gtk.Align.CENTER)
+        cal = theme.card("Calibration",
+                         "Only needed once on boards that report turbo as an "
+                         "unknown raw code", "emblem-system-symbolic")
+        self.col.append(cal)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        cal_text = theme.label("Probe the raw EC shift-mode codes",
+                               "mc-card-sub", wrap=True)
+        cal_text.set_hexpand(True)
+        row.append(cal_text)
+        cal_btn = Gtk.Button(label="Run calibration")
+        cal_btn.add_css_class("mc-ghost")
         cal_btn.connect("clicked", self.on_calibrate)
-        cal_btn_row = Adw.ActionRow(title="")
-        cal_btn_row.add_suffix(cal_btn)
-        g.add(cal_btn_row)
+        row.append(cal_btn)
+        cal.body.append(row)
 
-    # ---- handlers are synchronous; daemon ops are fast ------------------------
+        self._syncing = False
 
-    def on_mode(self, name: str) -> None:
+    @staticmethod
+    def _sep() -> Gtk.Box:
+        sep = Gtk.Box()
+        sep.add_css_class("mc-sep")
+        sep.set_margin_top(2)
+        sep.set_margin_bottom(2)
+        return sep
+
+    def _switch_row(self, body: Gtk.Box, icon_name: str, title: str,
+                    subtitle: str, handler) -> Gtk.Switch:
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        row.append(theme.icon(icon_name, 18, "mc-card-icon"))
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        text.append(theme.label(title, "mc-card-title"))
+        text.append(theme.label(subtitle, "mc-card-sub", wrap=True))
+        row.append(text)
+        spacer = Gtk.Box()
+        spacer.set_hexpand(True)
+        row.append(spacer)
+        sw = Gtk.Switch()
+        sw.set_valign(Gtk.Align.CENTER)
+        sw.connect("notify::active", handler)
+        row.append(sw)
+        body.append(row)
+        return sw
+
+    # ---- handlers ----------------------------------------------------------
+
+    def _on_card(self, card, key: str) -> None:
+        if self._syncing or not card.get_active():
+            return
+        self._syncing = True
+        try:
+            for k, other in self.mode_cards.items():
+                if k != key and other.get_active():
+                    other.set_active(False)
+        finally:
+            self._syncing = False
         try:
             with daemon_client.Client() as c:
-                c.request("set_shift_mode", mode=name)
+                c.request("set_shift_mode", mode=key)
+            self.window.toast(f"{PERF_INFO[key][0]} profile applied")
         except (daemon_client.DaemonDown, RuntimeError) as e:
-            self.window.toast(f"mode switch failed: {e}")
+            self.window.toast(f"profile switch failed: {e}")
 
     def on_cooler(self, row, *_a):
+        if getattr(row, "_sync", False):
+            return
         try:
             with daemon_client.Client() as c:
                 c.request("set_cooler_boost", on=row.get_active())
         except (daemon_client.DaemonDown, RuntimeError) as e:
             self.window.toast(f"cooler boost failed: {e}")
-            row.set_active(not row.get_active())
+            self._flip(row, self.on_cooler)
 
     def on_super_battery(self, row, *_a):
+        if getattr(row, "_sync", False):
+            return
         try:
             with daemon_client.Client() as c:
                 c.request("set_super_battery", on=row.get_active())
         except (daemon_client.DaemonDown, RuntimeError) as e:
             self.window.toast(f"super battery failed: {e}")
-            row.set_active(not row.get_active())
+            self._flip(row, self.on_super_battery)
 
     def on_saver(self, row, *_a):
+        if getattr(row, "_sync", False):
+            return
         try:
             with daemon_client.Client() as c:
                 res = c.request("set_super_saver", on=row.get_active())
@@ -405,7 +704,15 @@ class PerfPage(Page):
                 self.window.toast(res["note"])
         except (daemon_client.DaemonDown, RuntimeError) as e:
             self.window.toast(f"super saver failed: {e}")
-            row.set_active(not row.get_active())
+            self._flip(row, self.on_saver)
+
+    @staticmethod
+    def _flip(sw: Gtk.Switch, handler) -> None:
+        sw._sync = True
+        try:
+            sw.set_active(not sw.get_active())
+        finally:
+            sw._sync = False
 
     def on_calibrate(self, *_a):
         try:
@@ -415,26 +722,36 @@ class PerfPage(Page):
         except (daemon_client.DaemonDown, RuntimeError) as e:
             self.window.toast(f"calibration failed: {e}")
 
+    # ---- refresh -----------------------------------------------------------
+
+    @staticmethod
+    def _sync(sw: Gtk.Switch, value: bool) -> None:
+        if bool(value) == sw.get_active():
+            return
+        sw._sync = True
+        try:
+            sw.set_active(bool(value))
+        finally:
+            sw._sync = False
+
     def refresh(self, snap: dict) -> None:
         modes = snap.get("modes") or {}
         shift = (modes.get("shift") or "").split(" ")[0].lower()
-        if shift in self.mode_btns.buttons:
-            self.mode_btns.select(shift)
-        cb = self.cooler_row
-        if bool(modes.get("cooler_boost")) != cb.get_active():
-            cb.handler_block_by_func(self.on_cooler)
-            cb.set_active(bool(modes.get("cooler_boost")))
-            cb.handler_unblock_by_func(self.on_cooler)
-        sb = self.sbat_row
-        if bool(modes.get("super_battery")) != sb.get_active():
-            sb.handler_block_by_func(self.on_super_battery)
-            sb.set_active(bool(modes.get("super_battery")))
-            sb.handler_unblock_by_func(self.on_super_battery)
-        sv = self.saver_row
-        if bool(modes.get("super_saver")) != sv.get_active():
-            sv.handler_block_by_func(self.on_saver)
-            sv.set_active(bool(modes.get("super_saver")))
-            sv.handler_unblock_by_func(self.on_saver)
+        self._syncing = True
+        try:
+            for key, card in self.mode_cards.items():
+                card.set_active(key == shift)
+                if key == shift:
+                    card.set_status("ACTIVE", "ok")
+                elif key == "turbo":
+                    card.set_status("", "muted")
+                else:
+                    card.set_status("", "muted")
+        finally:
+            self._syncing = False
+        self._sync(self.cooler_row, bool(modes.get("cooler_boost")))
+        self._sync(self.sbat_row, bool(modes.get("super_battery")))
+        self._sync(self.saver_row, bool(modes.get("super_saver")))
 
     def reachability(self, ok, why):
         pass
@@ -443,121 +760,170 @@ class PerfPage(Page):
 # ==================================================================== gpu
 
 GPU_MODE_INFO = {
-    "hybrid": ("MSHybrid", "Both GPUs active · Optimus battery life · "
-                           "dGPU renders, iGPU presents"),
-    "discrete": ("Discrete", "dGPU drives the panel directly · highest FPS · "
-                             "more power draw"),
-    "integrated": ("Integrated", "iGPU only · dGPU powered down · "
-                                 "maximum battery life"),
+    "hybrid": ("MSHybrid",
+               "Both GPUs active. The iGPU presents and the dGPU renders on "
+               "demand (NVIDIA Optimus) — best battery life with full gaming "
+               "performance.",
+               "video-display-symbolic"),
+    "discrete": ("Discrete",
+                 "The dGPU drives the panel directly. Highest frame rates, "
+                 "no copy overhead, noticeably more power draw.",
+                 "media-playback-start-symbolic"),
+    "integrated": ("Integrated",
+                   "iGPU only. The dGPU is powered down and hidden — maximum "
+                   "battery life and the quietest operation.",
+                   "battery-good-symbolic"),
 }
 
 
 class GpuPage(Page):
-    """GPU MUX switch — MSI Center's 'GPU Switch' (hybrid/discrete/integrated)."""
+    """Firmware MUX switch with real post-boot verification."""
 
     def __init__(self, window):
-        super().__init__(window, "video-display-symbolic")
+        super().__init__(
+            window, "video-display-symbolic", "Graphics",
+            "Switch GPUs at the firmware level — MSHybrid, Discrete or "
+            "Integrated")
 
-        g = Adw.PreferencesGroup(
-            title="Graphics mode (MUX switch)",
-            description="Firmware-level panel routing. Changing it stages the "
-                        "mode and requires a full shutdown to apply.")
-        self.col.append(g)
-
-        row = Adw.ActionRow(title="Mode",
-                            subtitle="Choose the graphics mode to stage")
-        self.mode_btns = SegButtons(
-            [("hybrid", "MSHybrid"), ("discrete", "Discrete"),
-             ("integrated", "Integrated")],
-            self.on_mode)
-        self.mode_btns.select("hybrid")
-        # The snapshot loop runs every second; it must not overwrite a
-        # selection the user has made but not yet applied.
         self._picked: str | None = None
         self._last_target: str | None = None
-        self.mode_btns.set_valign(Gtk.Align.CENTER)
-        row.add_suffix(self.mode_btns)
-        g.add(row)
+        self._syncing = False
+        self._state: dict = {}
 
-        self.apply_row = Adw.ActionRow(
-            title="Apply staged mode",
-            subtitle="Runs the MSI Center firmware handshake, then asks for a "
-                     "full shutdown")
-        apply_btn = Gtk.Button(label="Apply")
-        apply_btn.add_css_class("suggested-action")
-        apply_btn.set_valign(Gtk.Align.CENTER)
-        apply_btn.connect("clicked", self.on_apply)
-        self.apply_row.add_suffix(apply_btn)
-        g.add(self.apply_row)
+        # ---- status banner -------------------------------------------------
+        self.banner = theme.banner("Reading firmware…", "", "accent",
+                                   "view-refresh-symbolic")
+        self.banner_actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                                      spacing=8)
+        self.banner_actions.set_valign(Gtk.Align.CENTER)
+        self.restart_btn = Gtk.Button(label="Restart now")
+        self.restart_btn.add_css_class("mc-primary")
+        self.restart_btn.connect("clicked", self.on_restart)
+        self.shutdown_btn = Gtk.Button(label="Shut down fully")
+        self.shutdown_btn.add_css_class("mc-ghost")
+        self.shutdown_btn.connect("clicked", self.on_shutdown)
+        self.banner_actions.append(self.shutdown_btn)
+        self.banner_actions.append(self.restart_btn)
+        self.banner.append(self.banner_actions)
+        self.col.append(self.banner)
 
-        self.pending_row = Adw.ActionRow(
-            title="Reboot pending",
-            subtitle="A different mode is staged — power off fully to apply")
-        self.pending_row.set_visible(False)
-        g.add(self.pending_row)
+        # ---- mode cards ----------------------------------------------------
+        self.col.append(theme.subsection(
+            "Choose a mode",
+            "The target is written to the MsiDCVarData UEFI variable and "
+            "armed with MSI's EC apply handshake."))
+        grid = Gtk.Grid(column_homogeneous=True, column_spacing=14)
+        self.col.append(grid)
+        self.cards: dict[str, theme.ModeCard] = {}
+        for i, key in enumerate(("hybrid", "discrete", "integrated")):
+            name, desc, ico = GPU_MODE_INFO[key]
+            card = theme.ModeCard(key, name, desc, ico)
+            card.connect("toggled", self._on_card, key)
+            grid.attach(card, i, 0, 1, 1)
+            self.cards[key] = card
 
-        g_status = Adw.PreferencesGroup(title="Current state")
-        self.col.append(g_status)
+        # ---- apply row -----------------------------------------------------
+        apply_card = theme.card()
+        self.col.append(apply_card)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        self.apply_title = theme.label("Pick a mode", "mc-card-title")
+        self.apply_sub = theme.label(
+            "Nothing is written until you press Apply",
+            "mc-card-sub", wrap=True)
+        text.append(self.apply_title)
+        text.append(self.apply_sub)
+        row.append(text)
+        spacer = Gtk.Box()
+        spacer.set_hexpand(True)
+        row.append(spacer)
+        self.spinner = Gtk.Spinner()
+        self.spinner.set_visible(False)
+        row.append(self.spinner)
+        self.apply_btn = Gtk.Button(label="Apply")
+        self.apply_btn.add_css_class("mc-primary")
+        self.apply_btn.set_valign(Gtk.Align.CENTER)
+        self.apply_btn.connect("clicked", self.on_apply)
+        row.append(self.apply_btn)
+        apply_card.body.append(row)
 
-        self.cur_row = _mk_row("Active mode", "reported by firmware")
-        self.cur_label = Gtk.Label(label="—")
-        self.cur_label.add_css_class("monospace")
-        self.cur_label.add_css_class("heading")
-        self.cur_row.add_suffix(self.cur_label)
-        g_status.add(self.cur_row)
+        # ---- live state ----------------------------------------------------
+        state_card = theme.card("Live state", "Read from firmware and hardware",
+                                "emblem-system-symbolic")
+        self.col.append(state_card)
+        self.kv = {}
+        for key, hint in (("Running now", "firmware current mode"),
+                          ("Live topology", "GPUs visible to the OS"),
+                          ("Staged target", "applied on next power-on"),
+                          ("Supported", "advertised by this firmware"),
+                          ("EC MUX 0x2E", "PXCT panel routing"),
+                          ("AC power", "required by the firmware")):
+            row, value = theme.key_value(key, "—")
+            state_card.body.append(row)
+            self.kv[key] = value
 
-        self.tgt_row = _mk_row("Staged target", "applied on next power-on")
-        self.tgt_label = Gtk.Label(label="—")
-        self.tgt_label.add_css_class("monospace")
-        self.tgt_row.add_suffix(self.tgt_label)
-        g_status.add(self.tgt_row)
+        # ---- detected GPUs -------------------------------------------------
+        gpu_card = theme.card("Detected GPUs", "Display controllers in this boot",
+                              "video-display-symbolic")
+        self.col.append(gpu_card)
+        self.gpu_body = gpu_card.body
 
-        self.sup_row = _mk_row("Supported modes", "advertised by the firmware")
-        self.sup_label = Gtk.Label(label="—")
-        self.sup_label.add_css_class("monospace")
-        self.sup_row.add_suffix(self.sup_label)
-        g_status.add(self.sup_row)
+        # ---- safety --------------------------------------------------------
+        safety = theme.card("How the switch works",
+                            "Firmware-level — the app never reboots on its own",
+                            "dialog-information-symbolic")
+        self.col.append(safety)
+        for step in (
+            "1. The target mode is written to the MsiDCVarData UEFI variable.",
+            "2. The EC apply trigger runs and the firmware acknowledges it.",
+            "3. The MUX is re-routed during POST — so the next start applies it.",
+            "4. If any step fails before the trigger, the previous target is "
+            "restored and verified.",
+            "If a warm restart does not change the mode, shut down completely "
+            "and power on; this is what MSI Center's own restart prompt means.",
+        ):
+            safety.body.append(theme.label(step, "mc-card-sub", wrap=True))
 
-        self.mux_row = _mk_row("EC MUX register", "0x2E bit 6 (PXCT)")
-        self.mux_label = Gtk.Label(label="—")
-        self.mux_label.add_css_class("monospace")
-        self.mux_row.add_suffix(self.mux_label)
-        g_status.add(self.mux_row)
+        self._gpu_rows = 0
 
-        g_gpu = Adw.PreferencesGroup(title="Detected GPUs")
-        self.col.append(g_gpu)
-        self.gpu_rows: list[Adw.ActionRow] = []
-        self.gpu_group = g_gpu
+    # ---- selection ---------------------------------------------------------
 
-        self.warn = Adw.PreferencesGroup()
-        self.col.append(self.warn)
-        note = Adw.ActionRow(
-            title="What happens on Apply",
-            subtitle="The target is written to the MsiDCVarData UEFI variable, "
-                     "the EC apply trigger runs, then the firmware acknowledges. "
-                     "Nothing changes until the next power-on. If any step "
-                     "fails, the previous target is restored.")
-        note.set_activatable(False)
-        self.warn.add(note)
-
-    # ---- actions ---------------------------------------------------------------
-
-    def on_mode(self, key: str) -> None:
+    def _on_card(self, card: theme.ModeCard, key: str) -> None:
+        if self._syncing or not card.get_active():
+            return
+        self._syncing = True
+        try:
+            for k, other in self.cards.items():
+                if k != key and other.get_active():
+                    other.set_active(False)
+        finally:
+            self._syncing = False
         self._picked = key
-        self.window.toast(
-            f"{GPU_MODE_INFO.get(key, (key,))[0]} selected — press Apply to stage it")
+        label = GPU_MODE_INFO[key][0]
+        self.apply_title.set_label(f"Stage {label}")
+        self.apply_sub.set_label(
+            "The firmware changes on the next start — press Apply to stage it")
+        self.apply_btn.set_sensitive(
+            key != (self._state.get("target") or self._state.get("current")))
+
+    # ---- actions -----------------------------------------------------------
 
     def on_apply(self, *_a):
-        key = self._picked or self.mode_btns.selected or "hybrid"
-        self.mode_btns.select(key)
-        label = GPU_MODE_INFO.get(key, (key,))[0]
+        key = self._picked
+        if not key:
+            self.window.toast("Pick a graphics mode first")
+            return
+        if key == self._state.get("target"):
+            self.window.toast(
+                f"{GPU_MODE_INFO[key][0]} is already staged — restart to apply")
+            return
+        label = GPU_MODE_INFO[key][0]
         dlg = Adw.MessageDialog(
             transient_for=self.window,
-            heading=f"Switch to {label}?",
-            body="The firmware mode changes on the next power-on. Save all work "
-                 "and close applications before shutting down.\n\n"
-                 "A full shutdown (power off) is required — a reboot alone does "
-                 "not apply the MUX change.")
+            heading=f"Stage {label}?",
+            body="The target is written to UEFI and armed now; the GPU MUX "
+                 "changes when the machine next starts.\n\n"
+                 "Connect AC power first. Save your work, then restart.")
         dlg.add_response("cancel", "Cancel")
         dlg.add_response("apply", f"Stage {label}")
         dlg.set_response_appearance("apply", Adw.ResponseAppearance.SUGGESTED)
@@ -570,101 +936,246 @@ class GpuPage(Page):
         dlg.destroy()
         if response != "apply":
             return
-        try:
-            with daemon_client.Client(timeout=15.0) as c:
-                res = c.request("set_gpu_mode", mode=key)
-        except (daemon_client.DaemonDown, RuntimeError) as e:
-            self.window.toast(f"GPU mode change failed: {e}")
-            self.window.request_snapshot()
-            return
-        self._picked = res.get("mode", key)
-        self._last_target = None      # force a resync from the new state
-        self.window.toast(
-            f"{res.get('label', key)} staged — save your work and shut down "
-            "completely to apply")
-        self.window.request_snapshot()
+        self.apply_btn.set_sensitive(False)
+        self.spinner.set_visible(True)
+        self.spinner.start()
 
-    # ---- refresh ---------------------------------------------------------------
+        def work() -> None:
+            try:
+                with daemon_client.Client(timeout=25.0) as c:
+                    res = c.request("set_gpu_mode", mode=key)
+                err = None
+            except (daemon_client.DaemonDown, RuntimeError) as e:
+                res, err = None, str(e)
+            GLib.idle_add(self._apply_done, res, err, key)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply_done(self, res, err, key: str) -> bool:
+        self.spinner.stop()
+        self.spinner.set_visible(False)
+        self.apply_btn.set_sensitive(True)
+        if err:
+            self.window.toast(f"Graphics switch failed: {err}")
+        elif res and res.get("already_staged"):
+            self.window.toast(
+                f"{GPU_MODE_INFO[key][0]} was already staged — restart to apply")
+        else:
+            self.window.toast(
+                f"{GPU_MODE_INFO[key][0]} staged — restart to apply it")
+        self._last_target = None
+        self.window.request_snapshot()
+        return False
+
+    def _confirm_power(self, kind: str) -> None:
+        if kind == "reboot":
+            heading = "Restart now?"
+            body = ("The graphics mode will be applied when the machine starts.\n\n"
+                    "Save your work. If the mode is unchanged after the "
+                    "restart, shut down completely and power on again.")
+            btn = "Restart"
+        else:
+            heading = "Shut down now?"
+            body = ("A full shutdown is the most reliable way to apply the "
+                    "graphics-mode change — the MUX is re-routed during POST.\n\n"
+                    "Save your work. Power the laptop back on to finish.")
+            btn = "Shut down"
+        dlg = Adw.MessageDialog(transient_for=self.window, heading=heading,
+                                body=body)
+        dlg.add_response("cancel", "Cancel")
+        dlg.add_response("go", btn)
+        dlg.set_response_appearance("go", Adw.ResponseAppearance.DESTRUCTIVE)
+        dlg.set_default_response("cancel")
+        dlg.set_close_response("cancel")
+        dlg.connect("response", self._power_confirmed, kind)
+        dlg.present()
+
+    def _power_confirmed(self, dlg, response, kind: str) -> None:
+        dlg.destroy()
+        if response != "go":
+            return
+        op = "gpu_restart" if kind == "reboot" else "gpu_shutdown"
+        try:
+            with daemon_client.Client(timeout=10.0) as c:
+                c.request(op)
+            self.window.toast("Shutting down…" if kind == "poweroff"
+                              else "Restarting…")
+        except (daemon_client.DaemonDown, RuntimeError) as e:
+            self.window.toast(f"Power action failed: {e}")
+
+    def on_restart(self, *_a):
+        self._confirm_power("reboot")
+
+    def on_shutdown(self, *_a):
+        self._confirm_power("poweroff")
+
+    # ---- refresh -----------------------------------------------------------
 
     def refresh(self, snap: dict) -> None:
         st = snap.get("gpu_mode") or {}
-        if not st.get("available"):
-            self.mode_btns.set_sensitive(False)
-            self.apply_row.set_sensitive(False)
-            self.cur_label.set_label("not available")
-            self.tgt_label.set_label("—")
-            self.sup_label.set_label("—")
-            self.mux_label.set_label("—")
-            self.pending_row.set_visible(False)
-            return
-
-        self.mode_btns.set_sensitive(True)
-        self.apply_row.set_sensitive(True)
-
-        cur, tgt = st.get("current"), st.get("target")
-        self.cur_label.set_label(
-            GPU_MODE_INFO.get(cur, (cur,))[0] if cur else "unknown")
-        self.tgt_label.set_label(
-            GPU_MODE_INFO.get(tgt, (tgt,))[0] if tgt else "unknown")
-        sup = st.get("supported") or []
-        self.sup_label.set_label(
-            " · ".join(GPU_MODE_INFO.get(m, (m,))[0] for m in sup) or "—")
-
-        # Only offer modes the firmware advertises
-        for key, btn in self.mode_btns.buttons.items():
-            btn.set_sensitive(key in sup)
-
-        # Sync the selector from the daemon only when the target actually
-        # changes (initial load, or a completed apply). Re-selecting on every
-        # snapshot would snap the user's pending choice back to the staged
-        # target before they could press Apply.
-        if tgt and tgt != self._last_target:
-            self._last_target = tgt
-            if self._picked is None or self._picked == tgt:
-                self._picked = tgt
-                self.mode_btns.select(tgt)
-
-        mux = st.get("mux_ec")
-        self.mux_label.set_label(
-            f"0x{mux:02X} · {'discrete' if mux & 0x40 else 'hybrid'}"
-            if mux is not None else "—")
-        self.pending_row.set_visible(bool(st.get("reboot_pending")))
-
-        # Detected GPUs (from the detailed state op, filled lazily)
+        self._state = st
         self._refresh_gpus()
 
-    def _refresh_gpus(self) -> None:
+        if not st.get("available"):
+            self.banner.set_visible(True)
+            self.banner.title_label.set_label("No switchable GPU MUX")
+            self.banner.subtitle_label.set_label(
+                "This firmware does not expose MsiDCVarData — the graphics "
+                "mode is fixed.")
+            for cls in ("mc-banner-accent", "mc-banner-ok", "mc-banner-warn",
+                        "mc-banner-err"):
+                self.banner.remove_css_class(cls)
+            self.banner.add_css_class("mc-banner-muted")
+            self.banner_actions.set_visible(False)
+            self.apply_btn.set_sensitive(False)
+            for card in self.cards.values():
+                card.set_sensitive(False)
+                card.set_status("", "muted")
+            for value in self.kv.values():
+                value.set_label("—")
+            return
+
+        cur = st.get("current")
+        tgt = st.get("target")
+        sup = st.get("supported") or []
+        pending = bool(st.get("restart_required"))
+        failed = bool(st.get("apply_failed"))
+
+        # banner
+        for cls in ("mc-banner-accent", "mc-banner-ok", "mc-banner-warn",
+                    "mc-banner-err", "mc-banner-muted"):
+            self.banner.remove_css_class(cls)
+        if failed:
+            self.banner.add_css_class("mc-banner-err")
+            req = st.get("requested")
+            self.banner.title_label.set_label("The switch did not apply")
+            self.banner.subtitle_label.set_label(
+                f"Requested {GPU_MODE_INFO.get(req, (req,))[0]}, but the machine "
+                f"is running {GPU_MODE_INFO.get(cur, (cur,))[0]}. A warm reboot "
+                "skipped the MUX POST step — shut down completely, then power on.")
+        elif pending:
+            self.banner.add_css_class("mc-banner-warn")
+            self.banner.title_label.set_label("Restart required")
+            self.banner.subtitle_label.set_label(
+                f"{GPU_MODE_INFO.get(tgt, (tgt,))[0]} is staged. Restart to "
+                f"switch from {GPU_MODE_INFO.get(cur, (cur,))[0]}.")
+        else:
+            self.banner.add_css_class("mc-banner-ok")
+            self.banner.title_label.set_label(
+                f"Running in {GPU_MODE_INFO.get(cur, (cur,))[0]}")
+            extra = (" · confirmed by live GPU topology"
+                     if st.get("current_source") == "runtime" else "")
+            self.banner.subtitle_label.set_label(
+                "The firmware and the hardware agree" + extra + ".")
+        self.banner_actions.set_visible(pending)
+
+        # cards
+        if self._picked is None:
+            self._picked = tgt
+        self._syncing = True
         try:
-            with daemon_client.Client() as c:
+            for key, card in self.cards.items():
+                card.set_sensitive(key in sup)
+                if key == cur:
+                    card.set_status("RUNNING", "ok")
+                elif key == tgt and tgt != cur:
+                    card.set_status("STAGED", "warn")
+                elif key == self._picked:
+                    card.set_status("SELECTED", "accent")
+                else:
+                    card.set_status("", "muted")
+                card.set_active(key == self._picked)
+        finally:
+            self._syncing = False
+        if self._picked not in sup and sup:
+            self._picked = sup[0]
+
+        # apply row
+        if tgt and tgt == self._picked and tgt != cur:
+            self.apply_title.set_label(
+                f"{GPU_MODE_INFO.get(tgt, (tgt,))[0]} staged")
+            self.apply_sub.set_label("Restart is required to apply it")
+            self.apply_btn.set_sensitive(False)
+        elif tgt == self._picked:
+            self.apply_title.set_label(
+                f"Running in {GPU_MODE_INFO.get(self._picked, (self._picked,))[0]}")
+            self.apply_sub.set_label("This is already the active mode")
+            self.apply_btn.set_sensitive(False)
+        else:
+            label = GPU_MODE_INFO.get(self._picked, (self._picked,))[0]
+            self.apply_title.set_label(f"Stage {label}")
+            self.apply_sub.set_label(
+                "Firmware changes on the next start — press Apply to stage it")
+            self.apply_btn.set_sensitive(self._picked in sup)
+
+        # live state values
+        rt = (st.get("runtime") or {}).get("mode")
+        mux = st.get("mux_ec")
+        self.kv["Running now"].set_label(
+            GPU_MODE_INFO.get(cur, (cur,))[0] if cur else "unknown")
+        self.kv["Live topology"].set_label(
+            GPU_MODE_INFO.get(rt, (rt,))[0] if rt else "inconclusive")
+        self.kv["Staged target"].set_label(
+            GPU_MODE_INFO.get(tgt, (tgt,))[0] if tgt else "—")
+        self.kv["Supported"].set_label(
+            " · ".join(GPU_MODE_INFO.get(m, (m,))[0] for m in sup) or "—")
+        self.kv["EC MUX 0x2E"].set_label(
+            f"0x{mux:02X} · {'dGPU path' if mux & 0x40 else 'iGPU path'}"
+            if mux is not None else "unavailable")
+        self.kv["AC power"].set_label(
+            "online" if st.get("ac_online") else "ON BATTERY — connect AC")
+
+    def _refresh_gpus(self) -> None:
+        if not self.get_mapped():
+            return
+        now = time.monotonic()
+        if now - getattr(self, "_gpu_fetch_at", 0.0) < 4.0:
+            return
+        self._gpu_fetch_at = now
+        try:
+            with daemon_client.Client(timeout=4.0) as c:
                 st = c.request("gpu_mode_state")
         except (daemon_client.DaemonDown, RuntimeError):
             return
         gpus = st.get("gpus") or []
-        if len(self.gpu_rows) == len(gpus):
-            for row, gpu in zip(self.gpu_rows, gpus):
-                row.set_subtitle(self._gpu_text(gpu))
+        children = []
+        child = self.gpu_body.get_first_child()
+        while child is not None:
+            children.append(child)
+            child = child.get_next_sibling()
+        if len(children) == len(gpus) and gpus:
+            for child, gpu in zip(children, gpus):
+                if hasattr(child, "mc_value"):
+                    child.mc_value.set_label(self._gpu_text(gpu))
             return
-        for row in self.gpu_rows:
-            self.gpu_group.remove(row)
-        self.gpu_rows = []
-        for gpu in gpus:
-            row = Adw.ActionRow(title=gpu["pci"],
-                                subtitle=self._gpu_text(gpu))
-            self.gpu_group.add(row)
-            self.gpu_rows.append(row)
+        for child in children:
+            self.gpu_body.remove(child)
         if not gpus:
-            row = Adw.ActionRow(title="No display controllers detected")
-            self.gpu_group.add(row)
-            self.gpu_rows.append(row)
+            self.gpu_body.append(theme.label("No display controllers detected",
+                                             "mc-card-sub"))
+            return
+        for gpu in gpus:
+            row, value = theme.key_value(self._gpu_title(gpu),
+                                         self._gpu_text(gpu))
+            row.mc_value = value
+            self.gpu_body.append(row)
+
+    @staticmethod
+    def _gpu_title(gpu: dict) -> str:
+        vendor = {"0x10de": "NVIDIA", "0x8086": "Intel",
+                  "0x1002": "AMD"}.get(gpu.get("vendor", ""),
+                                       gpu.get("vendor", ""))
+        return f"{vendor} · {gpu.get('pci', '')}"
 
     @staticmethod
     def _gpu_text(gpu: dict) -> str:
-        vendor = {"0x10de": "NVIDIA", "0x8086": "Intel",
-                  "0x1002": "AMD"}.get(gpu.get("vendor", ""), gpu.get("vendor", ""))
-        return f"{vendor} {gpu.get('device', '')} · driver {gpu.get('driver')}"
+        driver = gpu.get("driver") or "none"
+        return f"device {gpu.get('device', '—')} · driver {driver}"
 
     def reachability(self, ok, why):
-        pass
+        if not ok:
+            self.banner.title_label.set_label("Daemon unreachable")
+            self.banner.subtitle_label.set_label(why)
 
 
 # ==================================================================== fans
@@ -736,7 +1247,9 @@ class CurveEditor(Gtk.Frame):
 
 class FansPage(Page):
     def __init__(self, window):
-        super().__init__(window, "weather-wind-symbolic")
+        super().__init__(window, "weather-windy-symbolic", "Fans",
+                         "Cooling presets, custom six-point curves and the "
+                         "thermal watchdog")
 
         g = Adw.PreferencesGroup(
             title="Fan mode",
@@ -1153,7 +1666,8 @@ class FansPage(Page):
 
 class BatteryPage(Page):
     def __init__(self, window):
-        super().__init__(window, "battery-symbolic")
+        super().__init__(window, "battery-symbolic", "Battery",
+                         "Charge limiting and long-term cell health")
 
         g = Adw.PreferencesGroup(
             title="Charge limit",
@@ -1467,7 +1981,8 @@ class LightingPage(Page):
     functions (effect tiles, tuning, apply, profiles) scroll below."""
 
     def __init__(self, window):
-        super().__init__(window, "preferences-color-symbolic")
+        super().__init__(window, "preferences-color-symbolic", "Lighting",
+                         "Per-key RGB: effects, colours and saved profiles")
         self.selected: set[int] = set()
         self.preview_colors: list[str] = ["16161C"] * NUM_ZONES
         self._preview_active = False
@@ -1495,6 +2010,8 @@ class LightingPage(Page):
         self.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.NEVER)
 
         # ---- top half: status + keyboard reference (fixed) -----------------
+        main.append(theme.section(
+            "Lighting", "Per-key RGB: effects, colours and saved profiles"))
         upper = Adw.Clamp(maximum_size=1240, tightening_threshold=980)
         upper_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         upper.set_child(upper_box)
@@ -2407,32 +2924,91 @@ class LightingPage(Page):
 
 class SettingsPage(Page):
     def __init__(self, window):
-        super().__init__(window, "emblem-system-symbolic")
+        super().__init__(window, "emblem-system-symbolic", "Settings",
+                         "Service, appearance and diagnostics")
 
-        g = Adw.PreferencesGroup(title="Daemon (mystic-centerd)")
-        self.col.append(g)
-        self.svc_row = Adw.ActionRow(
-            title="Service status",
-            subtitle="checks systemctl is-active (no root needed)")
-        check_btn = Gtk.Button(label="Check now")
-        check_btn.set_valign(Gtk.Align.CENTER)
-        check_btn.connect("clicked", self.on_check)
-        self.svc_row.add_suffix(check_btn)
-        g.add(self.svc_row)
+        # ---- appearance ----------------------------------------------------
+        look = theme.card("Appearance", "Premium dark by default, light on demand",
+                          "applications-graphics-symbolic")
+        self.col.append(look)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        row.append(theme.icon("weather-clear-night-symbolic", 18,
+                              "mc-card-icon"))
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        text.append(theme.label("Dark interface", "mc-card-title"))
+        text.append(theme.label("Switch to the light palette",
+                                "mc-card-sub"))
+        row.append(text)
+        spacer = Gtk.Box()
+        spacer.set_hexpand(True)
+        row.append(spacer)
+        self.dark_switch = Gtk.Switch()
+        self.dark_switch.set_valign(Gtk.Align.CENTER)
+        self.dark_switch.set_active(theme.is_dark())
+        self.dark_switch.connect("notify::active", self.on_theme)
+        row.append(self.dark_switch)
+        look.body.append(row)
 
-        restart_row = Adw.ActionRow(
-            title="Restart service",
-            subtitle="runs `pkexec systemctl restart mystic-center` "
-                     "(password dialog appears)")
-        rst_btn = Gtk.Button(label="Restart")
-        rst_btn.set_valign(Gtk.Align.CENTER)
-        rst_btn.connect("clicked", self.on_restart)
-        restart_row.add_suffix(rst_btn)
-        g.add(restart_row)
+        # ---- daemon --------------------------------------------------------
+        svc = theme.card("Privileged service",
+                         "mystic-center.service owns EC, UEFI and WMI access",
+                         "emblem-system-symbolic")
+        self.col.append(svc)
+        self.svc_dot = theme.label("●", "mc-dot-ok")
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        row.append(self.svc_dot)
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        text.append(theme.label("Service status", "mc-card-title"))
+        self.svc_state = theme.label("checking…", "mc-card-sub")
+        text.append(self.svc_state)
+        row.append(text)
+        spacer = Gtk.Box()
+        spacer.set_hexpand(True)
+        row.append(spacer)
+        check = Gtk.Button(label="Check now")
+        check.add_css_class("mc-ghost")
+        check.connect("clicked", self.on_check)
+        row.append(check)
+        self.restart_svc = Gtk.Button(label="Restart")
+        self.restart_svc.add_css_class("mc-ghost")
+        self.restart_svc.connect("clicked", self.on_restart)
+        row.append(self.restart_svc)
+        svc.body.append(row)
+
+        # ---- about ---------------------------------------------------------
+        about = theme.card("About", None, "help-about-symbolic")
+        self.col.append(about)
+        self.about_kv = {}
+        for key, val in (("Application", APP_NAME),
+                         ("Interface", "GTK4 · libadwaita"),
+                         ("Machine", MACHINE_NAME),
+                         ("Board", MACHINE_BOARD or "—"),
+                         ("BIOS", MACHINE_BIOS or "—"),
+                         ("Kernel", os.uname().release)):
+            row, value = theme.key_value(key, val)
+            about.body.append(row)
+            self.about_kv[key] = value
+
+        link = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        about_label = theme.label(
+            "Documentation and source live in the install directory "
+            "(README.md, docs/)", "mc-card-sub", wrap=True)
+        about_label.set_hexpand(True)
+        link.append(about_label)
+        diag = Gtk.Button(label="Copy diagnostics")
+        diag.add_css_class("mc-ghost")
+        diag.connect("clicked", self.on_diag)
+        link.append(diag)
+        about.body.append(link)
+
+    def on_theme(self, sw, *_a):
+        theme.set_scheme(sw.get_active())
+        self.window.toast("Light theme" if not sw.get_active()
+                          else "Dark theme")
 
     def on_check(self, *_a):
         out = _sysctl("is-active")
-        self.svc_row.set_subtitle(f"service: {out or 'unknown'}")
+        self.svc_state.set_label(f"systemctl: {out or 'unknown'}")
         self.window.toast(f"service is {out or 'unknown'}")
 
     def on_restart(self, *_a):
@@ -2445,11 +3021,21 @@ class SettingsPage(Page):
         except OSError as e:
             self.window.toast(f"could not spawn pkexec: {e}")
 
+    def on_diag(self, *_a):
+        import json
+        snap = getattr(self.window, "_last_snap", {}) or {}
+        text = json.dumps(snap, indent=2, default=str)
+        self.get_clipboard().set(text)
+        self.window.toast("diagnostics copied to the clipboard")
+
     def refresh(self, snap: dict) -> None:
         pass
 
     def reachability(self, ok, why) -> None:
-        self.svc_row.set_subtitle(f"service: {'active' if ok else 'unreachable — ' + why}")
+        self.svc_state.set_label(f"service: {'active' if ok else 'unreachable — ' + why}")
+        self.svc_dot.remove_css_class("mc-dot-ok")
+        self.svc_dot.remove_css_class("mc-dot-err")
+        self.svc_dot.add_css_class("mc-dot-ok" if ok else "mc-dot-err")
 
 
 def _sysctl(*args) -> str:
@@ -2466,63 +3052,188 @@ def _raw_is_active() -> str:
 
 # ===================================================================== window
 
+NAV_ITEMS = [
+    ("control", "CONTROL CENTER", [
+        ("dashboard", "Dashboard", "view-grid-symbolic"),
+        ("perf", "Performance", "power-profile-performance-symbolic"),
+        ("fans", "Fans", "weather-windy-symbolic"),
+        ("battery", "Battery", "battery-symbolic"),
+        ("gpu", "Graphics", "video-display-symbolic"),
+        ("lighting", "Lighting", "preferences-color-symbolic"),
+    ]),
+    ("system", "SYSTEM", [
+        ("settings", "Settings", "emblem-system-symbolic"),
+    ]),
+]
+
+
+class NavButton(Gtk.ToggleButton):
+    def __init__(self, icon_name: str, title: str) -> None:
+        super().__init__()
+        self.add_css_class("mc-nav")
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=11)
+        box.append(theme.icon(icon_name, 17))
+        box.append(theme.label(title))
+        self.set_child(box)
+
+
+def _app_icon_widget(size: int = 26) -> Gtk.Widget:
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    svg = os.path.join(here, "data", "mystic-center-icon.svg")
+    if os.path.exists(svg):
+        img = Gtk.Image.new_from_file(svg)
+        img.set_pixel_size(size)
+        return img
+    return theme.icon("applications-system-symbolic", size, "mc-card-icon")
+
+
 class CenterWindow(Adw.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app, title=APP_NAME)
-        self.set_default_size(1240, 830)
-        self.set_size_request(940, 700)
+        self.set_default_size(1320, 860)
+        self.set_size_request(1040, 720)
+        self.add_css_class("mc-window")
 
-        # F11 fullscreen toggle (and app-positioned full-width layout)
-        self.install_action("win.toggle-fullscreen", None, self._toggle_fullscreen)
         app_obj = self.get_application()
+        self.install_action("win.toggle-fullscreen", None,
+                            self._toggle_fullscreen)
         if app_obj is not None:
-            app_obj.set_accels_for_action(
-                "win.toggle-fullscreen", ["F11"])
+            app_obj.set_accels_for_action("win.toggle-fullscreen", ["F11"])
 
-        layout = Adw.ToolbarView()
+        self.toast_overlay = Adw.ToastOverlay()
+        toolbar = Adw.ToolbarView()
+        toolbar.set_content(self.toast_overlay)
+        self.set_content(toolbar)
+
+        # ---- header bar ----------------------------------------------------
         header = Adw.HeaderBar()
+        header.add_css_class("mc-header")
+        header.set_title_widget(Gtk.Box())
+        toolbar.add_top_bar(header)
 
-        overlay = Adw.ToastOverlay()
-        layout.set_content(overlay)
-        layout.add_top_bar(header)
-        self.set_content(layout)
-        self.toast_overlay = overlay
+        brand = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        brand.set_margin_start(6)
+        brand.append(_app_icon_widget(24))
+        names = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        names.append(theme.label(APP_NAME, "mc-header-title"))
+        names.append(theme.label(MACHINE_NAME, "mc-brand-sub"))
+        brand.append(names)
+        header.pack_start(brand)
 
+        chips = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=7)
+        chips.set_margin_end(4)
+        self.chip_cpu = self._chip("weather-clear-symbolic", "CPU", "—")
+        self.chip_gpu = self._chip("video-display-symbolic", "GPU", "—")
+        self.chip_bat = self._chip("battery-symbolic", "", "—")
+        for chip in (self.chip_cpu, self.chip_gpu, self.chip_bat):
+            chips.append(chip)
+        header.pack_end(chips)
+
+        # ---- body ----------------------------------------------------------
+        body = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+
+        sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        sidebar.set_size_request(236, -1)
+        sidebar.set_margin_top(10)
+        sidebar.set_margin_bottom(0)
+        sidebar.set_margin_start(10)
+        sidebar.set_margin_end(0)
+
+        self.nav: dict[str, NavButton] = {}
         self.stack = Adw.ViewStack()
-        switcher = Adw.ViewSwitcher()
-        switcher.set_stack(self.stack)
-        switcher.set_policy(Adw.ViewSwitcherPolicy.WIDE)
-        header.set_title_widget(switcher)
 
-        self.pages: list[Page] = [
-            OverviewPage(self), PerfPage(self), FansPage(self),
-            BatteryPage(self), GpuPage(self), LightingPage(self),
-            SettingsPage(self),
-        ]
-        names = ["overview", "performance", "fans", "battery", "gpu",
-                 "lighting", "settings"]
-        icons = [p.icon_name for p in self.pages]
-        titles = ["Overview", "Performance", "Fans", "Battery", "GPU",
-                  "Lighting", "Settings"]
-        for name, title, page, icon in zip(names, titles, self.pages, icons):
-            self.stack.add_titled(page, name, title)
+        for _key, group_title, items in NAV_ITEMS:
+            sidebar.append(theme.label(group_title, "mc-nav-section"))
+            for name, title, ico in items:
+                btn = NavButton(ico, title)
+                btn.connect("toggled", self._on_nav, name)
+                sidebar.append(btn)
+                self.nav[name] = btn
+
+        spacer = Gtk.Box()
+        spacer.set_vexpand(True)
+        sidebar.append(spacer)
+
+        footer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=9)
+        footer.add_css_class("mc-sidebar-footer")
+        self.svc_dot = theme.label("●", "mc-dot-ok")
+        footer.append(self.svc_dot)
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.svc_label = theme.label("Connecting…", "mc-brand-sub")
+        text.append(self.svc_label)
+        footer.append(text)
+        sidebar.append(footer)
+
+        # left inset so the nav highlight has breathing room
+        side_wrap = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        side_wrap.add_css_class("mc-sidebar")
+        side_wrap.set_size_request(236, -1)
+        side_wrap.append(sidebar)
+        body.append(side_wrap)
+
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        content.set_hexpand(True)
 
         self.banner = Adw.Banner()
         self.banner.button_label = "Retry"
         self.banner.connect("button-clicked", self._retry_now)
+        content.append(self.banner)
+        content.append(self.stack)
+        body.append(content)
 
-        top_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        top_box.append(self.banner)
-        top_box.append(self.stack)
-        overlay.set_child(top_box)
+        self.toast_overlay.set_child(body)
 
-        # snapshot stream -----------------------------------------------------
+        # ---- pages ---------------------------------------------------------
+        self.pages = [
+            OverviewPage(self), PerfPage(self), FansPage(self),
+            BatteryPage(self), GpuPage(self), LightingPage(self),
+            SettingsPage(self),
+        ]
+        names = ["dashboard", "perf", "fans", "battery", "gpu", "lighting",
+                 "settings"]
+        for name, page in zip(names, self.pages):
+            self.stack.add_named(page, name)
+        self.show_page(os.environ.get("MYSTIC_CENTER_PAGE", "dashboard"))
+
+        # ---- snapshot stream -------------------------------------------------
         self._snap_lock = threading.Lock()
         self._last_snap: dict = {}
         self._thread = threading.Thread(
             target=self._snap_loop, name="snapshot", daemon=True)
         self._thread.start()
         self.connect("close-request", self._on_close)
+
+    @staticmethod
+    def _chip(icon_name: str, prefix: str, value: str) -> Gtk.Box:
+        chip = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        chip.add_css_class("mc-chip")
+        chip.append(theme.icon(icon_name, 14))
+        if prefix:
+            chip.append(theme.label(prefix, "mc-chip-label"))
+        val = theme.label(value, "mc-chip-value")
+        chip.append(val)
+        chip.value_label = val  # type: ignore[attr-defined]
+        return chip
+
+    # ---- navigation -----------------------------------------------------------
+
+    def _on_nav(self, btn: NavButton, name: str) -> None:
+        if not btn.get_active():
+            return
+        for key, other in self.nav.items():
+            if key != name and other.get_active():
+                other.handler_block_by_func(self._on_nav)
+                other.set_active(False)
+                other.handler_unblock_by_func(self._on_nav)
+        self.stack.set_visible_child_name(name)
+
+    def show_page(self, name: str) -> None:
+        btn = self.nav.get(name)
+        if btn is None:
+            return
+        if not btn.get_active():
+            btn.set_active(True)
+        self.stack.set_visible_child_name(name)
 
     # ---- snapshot thread ------------------------------------------------------
 
@@ -2536,7 +3247,7 @@ class CenterWindow(Adw.ApplicationWindow):
             except Exception as e:
                 why = str(e)
                 snap = None
-            GLib.idle_add(self._apply_snap, snap, why)  # posts to main thread
+            GLib.idle_add(self._apply_snap, snap, why)
             if self._closed:
                 return
             import time as _t
@@ -2546,15 +3257,30 @@ class CenterWindow(Adw.ApplicationWindow):
         self.banner.set_revealed(snap is None)
         if snap is None:
             self.banner.set_title(f"daemon unreachable — {why}")
+            self.svc_dot.remove_css_class("mc-dot-ok")
+            self.svc_dot.add_css_class("mc-dot-err")
+            self.svc_label.set_label("Daemon offline")
             for p in self.pages:
                 p.reachability(False, why)
             return False
         self._last_snap = snap
+        self.svc_dot.remove_css_class("mc-dot-err")
+        self.svc_dot.add_css_class("mc-dot-ok")
+        self.svc_label.set_label("Daemon online")
+
+        cpu = snap.get("cpu") or {}
+        gpu = snap.get("gpu") or {}
+        bat = snap.get("battery") or {}
+        self.chip_cpu.value_label.set_label(fmt(cpu.get("temp"), "°"))
+        self.chip_gpu.value_label.set_label(fmt(gpu.get("temp"), "°"))
+        percent = bat.get("percent")
+        self.chip_bat.value_label.set_label(
+            f"{percent}%" if percent is not None else "—")
         for p in self.pages:
             try:
                 p.refresh(snap)
                 p.reachability(True, "")
-            except Exception as e:  # one pages failure never kills the loop
+            except Exception as e:  # one page's failure never kills the loop
                 print(f"[gui] page refresh error: {e}")
         return False
 
@@ -2603,6 +3329,7 @@ class MysticCenterApp(Adw.Application):
         self.win: CenterWindow | None = None
 
     def do_activate(self):
+        theme.install(dark=theme.is_dark())
         self.win = CenterWindow(self)
         self.win.present()
 

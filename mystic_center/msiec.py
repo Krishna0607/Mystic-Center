@@ -8,6 +8,17 @@ from .util import MSIEC_BASE, read_file, read_int, write_file
 SHIFT_MODES = ("eco", "comfort", "turbo")
 FAN_MODES = ("auto", "silent", "advanced")
 
+# The EC shift byte on this board family (docs/EC-MAP.md): turbo 0xC4 (some
+# firmware revisions report 0xC0), comfort 0xC1, eco 0xC2. The msi-ec driver
+# decodes what it knows; when it reports "unknown (<raw>)" we resolve it here so
+# the GUI/CLI can still show the truth instead of "unknown (192)".
+SHIFT_RAW_NAMES = {
+    0xC0: "turbo",
+    0xC1: "comfort",
+    0xC2: "eco",
+    0xC4: "turbo",
+}
+
 
 def _p(name: str) -> str:
     return f"{MSIEC_BASE}/{name}"
@@ -42,6 +53,8 @@ def shift_mode() -> dict:
     name = name.strip() or None
     if name == "unknown":  # driver doesn't decode this raw value
         name = None
+    if name is None and raw in SHIFT_RAW_NAMES:
+        name = SHIFT_RAW_NAMES[raw]
     return {"name": name, "raw": raw, "text": text.strip()}
 
 

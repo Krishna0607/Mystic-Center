@@ -100,7 +100,12 @@ parsed = msiec.shift_mode.__wrapped__ if hasattr(msiec.shift_mode, "__wrapped__"
 # direct parse of the documented 'unknown (192)' line via a fake attr read
 msiec.read_file = lambda path: "unknown (192)" if path.endswith("shift_mode") else None  # type: ignore
 out = msiec.shift_mode()
-check("msiec shift parse: name None, raw 192", out["name"] is None and out["raw"] == 192)
+check("msiec shift parse: raw 192 (0xC0) resolves to turbo",
+      out["name"] == "turbo" and out["raw"] == 192)
+msiec.read_file = lambda path: "unknown (77)" if path.endswith("shift_mode") else None  # type: ignore
+out = msiec.shift_mode()
+check("msiec shift parse: truly unknown raw stays None",
+      out["name"] is None and out["raw"] == 77)
 msiec.read_file = lambda path: "turbo" if path.endswith("shift_mode") else None  # type: ignore
 out = msiec.shift_mode()
 check("msiec shift parse: clean name turbo", out["name"] == "turbo" and out["raw"] is None)
@@ -239,7 +244,13 @@ with open(_tmpvar2, "wb") as fh:
     fh.write((0x00000007).to_bytes(4, "little")
              + bytes([0x01, 0x01, 0x00, 0x06, 0x00, 0x30, 0x01] + [0] * 13))
 
-_orig = (_gm.VAR_PATH, _gm.ap_state, _gm._set_data, _gm._wait_apply_ready)
+_orig = (_gm.VAR_PATH, _gm.ap_state, _gm._set_data, _gm._wait_apply_ready,
+         _gm._ac_online, _gm.STATE_DIR, _gm.PENDING_PATH, _gm.FAILED_PATH)
+_state_dir = _tf.mkdtemp()
+_gm.STATE_DIR = _state_dir
+_gm.PENDING_PATH = os.path.join(_state_dir, 'gpu-pending.json')
+_gm.FAILED_PATH = os.path.join(_state_dir, 'gpu-apply-failed.json')
+_gm._ac_online = lambda: True
 _gm.VAR_PATH = _tmpvar2
 _gm.ap_state = lambda: {"flag": 1, "data_byte1": 0x02,
                         "apply_ready": True, "busy": False,
@@ -294,6 +305,101 @@ try:
     check("gpu in-flight trigger leaves the variable untouched",
           open(_tmpvar2, "rb").read() == before)
 finally:
-    _gm.VAR_PATH, _gm.ap_state, _gm._set_data, _gm._wait_apply_ready = _orig
+    (_gm.VAR_PATH, _gm.ap_state, _gm._set_data, _gm._wait_apply_ready,
+     _gm._ac_online, _gm.STATE_DIR, _gm.PENDING_PATH, _gm.FAILED_PATH) = _orig
+
+# ------------------------------------------------------- runtime topology
+_both = [{"vendor": "0x8086", "pci": "0000:00:02.0", "boot_vga": "1"},
+         {"vendor": "0x10de", "pci": "0000:01:00.0", "boot_vga": "0"}]
+check("gpu runtime: both controllers → hybrid",
+      gpumux.runtime_mode(_both)["mode"] == "hybrid")
+check("gpu runtime: dGPU only → discrete",
+      gpumux.runtime_mode([_both[1]])["mode"] == "discrete")
+check("gpu runtime: iGPU only → integrated",
+      gpumux.runtime_mode([_both[0]])["mode"] == "integrated")
+check("gpu runtime: no controllers → unknown",
+      gpumux.runtime_mode([])["mode"] is None)
+
+# ------------------------------------------------- post-boot journal logic
+_jdir = _tf.mkdtemp()
+_orig_j = (gpumux.STATE_DIR, gpumux.PENDING_PATH, gpumux.FAILED_PATH)
+gpumux.STATE_DIR = _jdir
+gpumux.PENDING_PATH = os.path.join(_jdir, "gpu-pending.json")
+gpumux.FAILED_PATH = os.path.join(_jdir, "gpu-apply-failed.json")
+try:
+    gpumux.record_pending("integrated", "hybrid", 0x30)
+    check("gpu journal: pending target recorded",
+          gpumux.read_pending().get("target") == "integrated")
+    same = {"current": "hybrid"}
+    gpumux._settle_journal(same)
+    check("gpu journal: same boot → pending_reboot",
+          same.get("pending_reboot") is True)
+
+    # simulate a reboot that did NOT apply the change
+    pend = gpumux.read_pending()
+    pend["boot_id"] = "0000-simulated-previous-boot"
+    gpumux._write_json(gpumux.PENDING_PATH, pend)
+    failed = {"current": "hybrid"}
+    gpumux._settle_journal(failed)
+    check("gpu journal: reboot without apply → apply_failed",
+          failed.get("apply_failed") is True
+          and failed.get("requested") == "integrated")
+    check("gpu journal: failed apply is persisted for the next snapshot",
+          gpumux.read_pending() == {}
+          and os.path.exists(gpumux.FAILED_PATH))
+
+    # simulate a boot that DID apply the change
+    gpumux.clear_failed()
+    gpumux.record_pending("discrete", "hybrid", 0x30)
+    ok = {"current": "discrete"}
+    gpumux._settle_journal(ok)
+    check("gpu journal: boot in the requested mode clears the journal",
+          ok.get("switch_applied") is True
+          and gpumux.read_pending() == {})
+finally:
+    (gpumux.STATE_DIR, gpumux.PENDING_PATH, gpumux.FAILED_PATH) = _orig_j
+
+# power actions must never fire without a staged switch
+_orig_pa = (gpumux.available, gpumux.read_state)
+gpumux.available = lambda: True
+gpumux.read_state = lambda: {"available": True, "restart_required": False}
+try:
+    gpumux.power_action("reboot")
+    check("gpu restart refused when nothing is staged", False)
+except gpumux.GpuModeError as exc:
+    check("gpu restart refused when nothing is staged",
+          "nothing to restart" in str(exc))
+finally:
+    gpumux.available, gpumux.read_state = _orig_pa
+
+# handshake: busy → ready is accepted; a steady busy times out
+_ap_seq = iter([0x01, 0x02, 0x02])
+_orig_ap = gpumux.ap_state
+def _fake_ap():
+    b = next(_ap_seq, 0x02)
+    return {"data_byte1": b, "apply_ready": bool(b & 2),
+            "busy": bool(b & 1), "raw": ""}
+gpumux.ap_state = _fake_ap
+try:
+    got = gpumux._wait_apply_ready(timeout=1.0, poll=0.01)
+    check("gpu handshake waits through the in-flight bit",
+          got["data_byte1"] == 0x02)
+    gpumux.ap_state = lambda: {"data_byte1": 0x01, "apply_ready": False,
+                               "busy": True, "raw": ""}
+    try:
+        gpumux._wait_apply_ready(timeout=0.25, poll=0.05)
+        check("gpu handshake times out on a steady in-flight trigger", False)
+    except gpumux.GpuModeError:
+        check("gpu handshake times out on a steady in-flight trigger", True)
+finally:
+    gpumux.ap_state = _orig_ap
+
+# --------------------------------------------------- EC shift byte decoding
+from mystic_center import msiec  # noqa: E402
+check("shift raw 0xC0 decodes to turbo",
+      msiec.SHIFT_RAW_NAMES[0xC0] == "turbo")
+check("shift raw 0xC2 decodes to eco",
+      msiec.SHIFT_RAW_NAMES[0xC2] == "eco")
+
 
 print(f"\nALL {CHECKS} CHECKS PASSED \u2713")

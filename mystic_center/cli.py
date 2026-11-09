@@ -116,6 +116,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--self-test", action="store_true",
                     help="trace the EC apply handshake (re-stages the current "
                          "mode, so the next boot is unchanged)")
+    sp.add_argument("--restart", action="store_true",
+                    help="apply a staged switch by restarting now")
+    sp.add_argument("--poweroff", action="store_true",
+                    help="apply a staged switch with a full shutdown (most "
+                         "reliable)")
+    sp.add_argument("--clear-failed", action="store_true",
+                    help="dismiss a recorded 'switch did not apply' warning")
     sp.add_argument("--json", action="store_true", help="raw JSON output")
     sub.add_parser("wmi2", help="inspect the MSI WMI platform interface")
     sub.add_parser("gui", help="open the dashboard")
@@ -153,6 +160,26 @@ def curve_text(curve):
 
 def _run_gpu(c, args) -> int:
     """`mystic-center gpu [hybrid|discrete|integrated]` — MSI Center's GPU switch."""
+    if args.restart or args.poweroff:
+        op = "gpu_restart" if args.restart else "gpu_shutdown"
+        res = c.request(op)
+        if args.json:
+            print(json.dumps(res, indent=2))
+            return 0
+        print(f"{res.get('scheduled', 'restart')} scheduled — "
+              f"{MODE_LABELS.get(res.get('staged_target'), res.get('staged_target'))} "
+              "will be applied at the next power-on.")
+        return 0
+
+    if args.clear_failed:
+        res = c.request("gpu_clear_failed")
+        if args.json:
+            print(json.dumps(res, indent=2))
+            return 0
+        print("cleared the recorded failed-switch warning" if res.get("cleared")
+              else "nothing to clear")
+        return 0
+
     if args.self_test:
         st = c.request("gpu_handshake_probe")
         if args.json:
@@ -211,11 +238,22 @@ def _run_gpu(c, args) -> int:
             return 1
         cur = st.get("current")
         tgt = st.get("target")
-        print(f"current mode : {MODE_LABELS.get(cur, cur)}")
+        print(f"current mode : {MODE_LABELS.get(cur, cur)}"
+              + (f"  (live detection: {st['current_source']})"
+                 if st.get("current_source") == "runtime" else ""))
         print(f"target mode  : {MODE_LABELS.get(tgt, tgt)}"
-              + ("   (reboot pending)" if st.get("reboot_pending") else ""))
+              + ("   (restart required)" if st.get("reboot_pending") else ""))
+        rt = st.get("runtime") or {}
+        if rt.get("mode"):
+            print(f"runtime GPUs : {MODE_LABELS.get(rt['mode'], rt['mode'])} "
+                  f"({rt.get('gpu_count')} controller(s))")
         print(f"supported    : "
               + ", ".join(MODE_LABELS[m] for m in st.get("supported", [])))
+        print(f"AC power     : {'online' if st.get('ac_online') else 'ON BATTERY'}")
+        if st.get("apply_failed"):
+            print(f"last switch  : FAILED to apply — requested "
+                  f"{MODE_LABELS.get(st.get('requested'), st.get('requested'))}, "
+                  "still running the old mode. Shut down fully, then power on.")
         if st.get("mux_ec") is not None:
             print(f"EC mux 0x2E  : 0x{st['mux_ec']:02X}"
                   f" (PXCT={'discrete' if st['mux_ec'] & 0x40 else 'hybrid'})")
@@ -236,10 +274,20 @@ def _run_gpu(c, args) -> int:
               f"0x{res['byte5_before']:02X} → 0x{res['byte5_staged']:02X}")
         print("nothing was written")
         return 0
+    if res.get("noop") or res.get("already_staged"):
+        print(f"{MODE_LABELS[res['mode']]} is already the staged target.")
+        if res.get("restart_required"):
+            print("Restart is still required to apply it:")
+            print("  mystic-center gpu --restart     (warm reboot)")
+            print("  mystic-center gpu --poweroff    (full shutdown — reliable)")
+        return 0
     print(f"{MODE_LABELS[res['mode']]} mode staged and the firmware apply "
           "handshake succeeded.")
-    print("Save your work and perform a FULL SHUTDOWN (power off, not reboot),")
-    print("then power on again. A reboot alone does not apply the MUX change.")
+    print("Save your work, then apply it with:")
+    print("  mystic-center gpu --restart     (restart now)")
+    print("  mystic-center gpu --poweroff    (full shutdown — most reliable)")
+    print("If the mode is unchanged after a warm restart, shut down fully and")
+    print("power on again; a reboot alone may not re-run the MUX POST step.")
     return 0
 
 

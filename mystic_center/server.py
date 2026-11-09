@@ -222,6 +222,12 @@ def _dispatch_builder(ops: PrivOps):
             return ops.gpu_handshake_probe()
         if op == "set_gpu_mode":
             return ops.set_gpu_mode(args["mode"], bool(args.get("dry_run")))
+        if op == "gpu_restart":
+            return ops.gpu_restart()
+        if op == "gpu_shutdown":
+            return ops.gpu_shutdown()
+        if op == "gpu_clear_failed":
+            return ops.gpu_clear_failed()
         if op == "ec_dump":
             return ops.ec_dump(args.get("addrs"))
         raise KeyError(f"unknown op {op!r}")

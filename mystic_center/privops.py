@@ -111,16 +111,17 @@ class PrivOps:
         }
 
     def _gpu_mode_summary(self) -> dict:
-        """Cheap MUX summary for snapshots (no WMI calls, no EC writes)."""
+        """Cheap MUX summary for snapshots (file reads only, no WMI calls)."""
         if not gpumux.available():
             return {"available": False}
         try:
-            info = gpumux.decode(gpumux._read_var()[1])
+            info = gpumux.read_state()
         except (gpumux.GpuModeError, OSError) as exc:
             return {"available": False, "error": str(exc)}
         info["available"] = True
-        info["supported"] = gpumux.supported_modes(info)
-        info["mux_ec"] = gpumux._read_ec_byte(gpumux.EC_MUX_REG)
+        # The snapshot loop only needs the mode fields; GPU enumeration is
+        # kept for the live graph but the heavy list stays in the state op.
+        info.pop("gpus", None)
         return info
 
     def modes(self) -> dict:
@@ -255,6 +256,18 @@ class PrivOps:
             raise gpumux.GpuModeError(
                 "no switchable MUX on this machine (MsiDCVarData missing)")
         return gpumux.set_mode(mode, dry_run=bool(dry_run))
+
+    def gpu_restart(self) -> dict:
+        """Reboot to apply a staged graphics-mode switch."""
+        return gpumux.power_action("reboot")
+
+    def gpu_shutdown(self) -> dict:
+        """Full power-off (the guaranteed way to apply a MUX switch)."""
+        return gpumux.power_action("poweroff")
+
+    def gpu_clear_failed(self) -> dict:
+        gpumux.clear_failed()
+        return {"cleared": True}
 
     # ---- fans ------------------------------------------------------------------
 

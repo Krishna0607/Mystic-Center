@@ -6,8 +6,13 @@ battery charge limits, the GPU MUX switch, and the full 24-zone RGB keyboard
 controller — all in one window.
 
 ```
-Overview · Performance · Fans · Battery · GPU · Lighting · Settings
+Dashboard · Performance · Fans · Battery · Graphics · Lighting · Settings
 ```
+
+The GUI is a dark, control-center style shell: a grouped sidebar, live status
+chips in the header (CPU/GPU temperature and battery), a dashboard with a
+system hero and telemetry tiles, and one large card per subsystem. A light
+palette is available under **Settings → Appearance**.
 
 ## How it works
 
@@ -189,6 +194,9 @@ mystic-center fn-swap right          # Fn on the right side
 mystic-center gpu                    # GPU MUX state (MSHybrid/Discrete/Integrated)
 mystic-center gpu discrete           # stage dGPU mode + firmware handshake
 mystic-center gpu igpu --dry-run     # show the byte transition, write nothing
+mystic-center gpu --restart          # restart to apply a staged switch
+mystic-center gpu --poweroff         # full shutdown (most reliable apply)
+mystic-center gpu --clear-failed     # dismiss a recorded failed-switch warning
 mystic-center gpu --probe            # raw Get_AP packages + EC switch registers
 mystic-center gpu --self-test        # trace the EC handshake, boot mode unchanged
 mystic-center calibrate              # raw EC mode-code exploration (safe)
@@ -215,15 +223,23 @@ mystic-center                        # GUI
   - curves are sanitized (monotonic ramp, 0–100 %) before they reach the
     firmware.
 - Charge limits are clamped (start ≤ end − 5, end ≤ 100).
-- **GPU MUX switching** writes the `MsiDCVarData` UEFI variable (only bits 0–1
-  of byte 5, attributes verified) and runs MSI Center's EC apply handshake
-  through the WMI platform interface. Every step is read back. A failure
-  before the EC trigger restores the previous target; after the trigger the
-  target stays staged, because the EC has already taken it. The app never
-  reboots or powers off on its own — the new mode applies on the next full
-  power-on. The preflight refuses only while a trigger is in flight (bit 0);
-  the apply-ready bit stays latched after a completed switch. See
-  [`docs/GPU-MUX-MAP.md`](docs/GPU-MUX-MAP.md).
+- **GPU MUX switching** requires AC power, writes the `MsiDCVarData` UEFI
+  variable (only bits 0–1 of byte 5, attributes verified) and runs MSI
+  Center's EC apply handshake through the WMI platform interface. Every step
+  is read back. A failure before the EC trigger restores the previous
+  target; after the trigger the target stays staged, because the EC has
+  already taken it. The preflight refuses on battery and while a trigger is
+  in flight (bit 0); the apply-ready bit stays latched after a completed
+  switch. The app never reboots or powers off on its own — the GUI and CLI
+  offer explicit **Restart now** / **Shut down fully** actions, and the
+  daemon refuses both unless a switch is staged.
+- **Post-boot verification**: staging writes
+  `/var/lib/mystic-center/gpu-pending.json`. On the next boot the daemon
+  either clears it (the switch applied) or records
+  `gpu-apply-failed.json` and warns that the mode did not change — usually
+  a warm reboot that skipped the MUX POST step. Live GPU topology
+  (both / dGPU-only / iGPU-only) independently confirms which mode is
+  actually running. See [`docs/GPU-MUX-MAP.md`](docs/GPU-MUX-MAP.md).
 - If anything odd happens, a full laptop power-off (cold boot) restores the EC
   to factory defaults.
 
@@ -246,12 +262,18 @@ mystic-center                        # GUI
 - **GPU page says "not available"** — this machine has no `MsiDCVarData`
   variable, i.e. no switchable MUX. Nothing else is affected.
 - **GPU mode staged but nothing changed** — the firmware applies it on the
-  next power-on: shut down completely and start again (a warm reboot is not
-  enough). `mystic-center gpu` shows `reboot pending` until then. This is a
-  hardware MUX limitation, not an app one — MSI Center also requires a
-  restart. For a no-reboot way to run a program on the dGPU while in
-  MSHybrid mode, use PRIME render offload:
+  next power-on, and a warm reboot may skip the MUX POST step. Use
+  **Shut down fully** / `mystic-center gpu --poweroff` rather than a
+  restart; the GUI remembers a staged switch and reports
+  "Restart required" until it is applied. If a reboot did not apply it, the
+  app shows "The last graphics-mode switch did not apply" — dismiss it with
+  `mystic-center gpu --clear-failed` after shutting down fully. For a
+  no-reboot way to run
+  a program on the dGPU while in MSHybrid mode, use PRIME render offload:
   `__NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia <command>`.
+- **GPU switch refused on battery** — connect the charger. MSI's firmware
+  refuses to move the MUX on battery, and the app mirrors that rule to avoid
+  a black screen on the next boot.
 - **GPU switch says "apply is already in flight"** — the EC is mid-trigger.
   Wait a few seconds; if it persists, shut down fully rather than retrying.
 
@@ -266,7 +288,8 @@ mystic-center                        # GUI
 | Custom fan curves | ✅ **live-validated** (2026-10-18) — MSI-Center parity via `msi_wmi_platform` (WMI2 tables); AP-bit round-trip exact (`0x0D`↔`0x8D`), every write readback-verified, duty tables drive real RPM (CPU 2962→4137, GPU 0→2981), clean restore to firmware auto; `sudo tools/wmi2_probe.py --write-test` remains for first-contact checks on fresh machines |
 | Battery charge-limit sliders | ✅ kernel interface; values verified |
 | 24-zone RGB keyboard | ✅ full MSI-Center parity set (wave, dance, wheel, bouncy ball, Customize, all-sync, Save/Revert to MCU) — live-verified on hardware incl. wave parameter sweep and both directions (2026-10-18); packet-level parity tests passing |
-| GPU MUX switch (MSHybrid / Discrete / Integrated) | ✅ **handshake live-validated** (2026-10-19) — UEFI `MsiDCVarData` byte 5 + EC apply handshake (`0xD1` trigger → apply-ready → `0xBE 0x02` ack), traced `0x02 → 0x01 → 0x02`; capability-gated, readback-verified, conditional rollback; all three modes advertised by this unit's firmware; boot application still requires a full power-on (hardware MUX) |
+| GPU MUX switch (MSHybrid / Discrete / Integrated) | ✅ **handshake live-validated** (2026-10-19) — UEFI `MsiDCVarData` byte 5 + AC gate + EC apply handshake (`0xD1` trigger → apply-ready → `0xBE 0x02` ack), traced `0x02 → 0x01 → 0x02`; capability-gated, readback-verified, conditional rollback; all three modes advertised by this unit's firmware; post-boot journal detects a warm reboot that failed to apply, and live GPU topology confirms the running mode; boot application still requires a power-on (hardware MUX) |
+| Premium control-center UI | ✅ dark/light GTK4 shell with grouped sidebar, header status chips, dashboard hero + telemetry tiles, mode cards, status banners and explicit Restart/Shut-down actions |
 | Webcam / Fn-side swap | ✅ via msi-ec |
 | Autostart + packaging | ✅ systemd service + .desktop |
 
